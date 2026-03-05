@@ -202,7 +202,10 @@ function createSession(sessionId, displayName, proxy) {
     if (proxy) puppeteerArgs.push(`--proxy-server=${proxy}`);
 
 const client = new Client({
-  authStrategy: new LocalAuth({ clientId: sessionId }),
+  authStrategy: new LocalAuth({ 
+    clientId: sessionId,
+    dataPath: path.join(DATA_DIR, '.wwebjs_auth')
+  }),
   puppeteer: {
     headless: true,
     executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
