@@ -1,6 +1,16 @@
+# --- Stage 1: Build Client ---
+FROM node:18-slim AS client-builder
+
+WORKDIR /app/client
+COPY client/package*.json ./
+RUN npm install
+COPY client/ ./
+RUN npm run build
+
+# --- Stage 2: Production Server ---
 FROM node:18-slim
 
-# Установка зависимостей для Puppeteer
+# Install dependencies for Puppeteer/Chromium
 RUN apt-get update && apt-get install -y \
     chromium \
     fonts-liberation \
@@ -22,32 +32,26 @@ RUN apt-get update && apt-get install -y \
     --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
-# Переменные для Puppeteer
+# Environment variables for Puppeteer
 ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
 ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
+ENV NODE_ENV=production
 
 WORKDIR /app
 
-# Копируем package.json
-COPY package*.json ./
+# Copy server package files and install production dependencies
 COPY server/package*.json ./server/
-COPY client/package*.json ./client/
-
-# Устанавливаем зависимости сервера
 RUN cd server && npm install --production
 
-# Устанавливаем и билдим клиент
-RUN cd client && npm install && npm run build
+# Copy built client from Stage 1
+COPY --from=client-builder /app/client/dist ./client/dist
 
-# Копируем исходники
-COPY server ./server
-COPY client/dist ./client/dist
+# Copy server source code
+COPY server/ ./server/
 
-# Создаём директории для данных
+# Create necessary directories for runtime data
 RUN mkdir -p /app/server/data /app/server/uploads /app/server/.wwebjs_auth
 
-# Порт
 EXPOSE 3001
 
-# Запуск
 CMD ["node", "server/index.js"]
