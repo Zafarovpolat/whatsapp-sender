@@ -50,7 +50,12 @@ try {
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: '*' } });
+const io = new Server(server, { 
+  cors: { origin: '*' },
+  pingTimeout: 60000,
+  pingInterval: 25000,
+  transports: ['websocket', 'polling']
+});
 
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
@@ -202,7 +207,8 @@ const client = new Client({
       '--disable-background-networking',
       '--disable-default-apps',
       '--disable-sync',
-      '--disable-translate'
+      '--disable-translate',
+      '--js-flags="--max-old-space-size=256"'
     ],
     timeout: 120000
   },
@@ -668,9 +674,9 @@ if (fs.existsSync(clientBuildPath)) {
   console.log('[OK] Serving client build');
 }
 
-const PORT = 3001;
+const PORT = process.env.PORT || 3001;
 
-server.listen(PORT, () => {
+server.listen(PORT, '0.0.0.0', () => {
   console.log(`\n=== Server: http://localhost:${PORT} ===\n`);
   setTimeout(loadSavedSessions, 2000);
 });

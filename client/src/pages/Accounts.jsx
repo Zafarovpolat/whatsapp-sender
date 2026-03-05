@@ -39,14 +39,25 @@ export default function Accounts() {
   useEffect(() => { load(); }, []);
 
   useEffect(() => {
+    socket.on('connect', () => console.log('[SOCKET] Connected'));
+    socket.on('connect_error', (err) => console.error('[SOCKET] Error:', err.message));
+
     socket.on('sessions:update', (data) => {
       setSessions(data);
       if (showQrFor) {
         const s = data.find(x => x.id === showQrFor);
-        if (s && s.status === 'ready') setShowQrFor(null);
+        // Если аккаунт стал ready, закрываем модалку через 2 сек (чтобы пользователь увидел успех)
+        if (s && s.status === 'ready') {
+          setTimeout(() => setShowQrFor(null), 2000);
+        }
       }
     });
-    return () => socket.off('sessions:update');
+
+    return () => {
+      socket.off('connect');
+      socket.off('connect_error');
+      socket.off('sessions:update');
+    };
   }, [showQrFor]);
 
   const create = async () => {
@@ -214,7 +225,7 @@ export default function Accounts() {
                     <div className="qr-code-box">
                       <QRCodeSVG value={qrSession.qr} size={200} />
                     </div>
-                    <QrTimer />
+                    <QrTimer qr={qrSession.qr} />
                   </div>
                 )}
 
@@ -254,21 +265,33 @@ export default function Accounts() {
   );
 }
 
-function QrTimer() {
-  const [seconds, setSeconds] = useState(60);
+function QrTimer({ qr }) {
+  const [seconds, setSeconds] = useState(90);
   const ref = useRef();
+
   useEffect(() => {
-    setSeconds(60);
+    setSeconds(90);
+    if (ref.current) clearInterval(ref.current);
     ref.current = setInterval(() => {
-      setSeconds(p => { if (p <= 1) { clearInterval(ref.current); return 0; } return p - 1; });
+      setSeconds(prev => {
+        if (prev <= 1) {
+          clearInterval(ref.current);
+          return 0;
+        }
+        return prev - 1;
+      });
     }, 1000);
     return () => clearInterval(ref.current);
-  }, []);
+  }, [qr]);
 
   return (
     <div className="qr-timer">
-      <div className="qr-timer-track"><div className="qr-timer-fill" style={{ width: `${(seconds / 60) * 100}%` }} /></div>
-      <div className="qr-timer-label">{seconds > 0 ? `QR обновится через ${seconds} сек` : 'Обновление...'}</div>
+      <div className="qr-timer-track">
+        <div className="qr-timer-fill" style={{ width: `${(seconds / 90) * 100}%`, transition: 'width 1s linear' }} />
+      </div>
+      <div className="qr-timer-label">
+        {seconds > 0 ? `QR обновится через ${seconds} сек` : 'Ожидание нового QR...'}
+      </div>
     </div>
   );
 }
