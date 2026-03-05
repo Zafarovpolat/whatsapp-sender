@@ -71,7 +71,7 @@ function generateToken() {
 
 function authMiddleware(req, res, next) {
   if (!AUTH_PASSWORD) return next(); // Нет пароля — нет защиты
-  if (req.path === '/api/auth/login') return next();
+  if (req.path === '/auth/login' || req.path === '/auth/check') return next();
   
   const token = req.headers['x-auth-token'];
   if (!token || !authTokens.has(token)) {
