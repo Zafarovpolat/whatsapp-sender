@@ -1,0 +1,5 @@
+{
+  "watch": ["*.js"],
+  "ignore": ["data/*", "uploads/*", ".wwebjs_auth/*", "node_modules/*"],
+  "ext": "js"
+}
