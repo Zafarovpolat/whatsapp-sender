@@ -1,4 +1,4 @@
-import { useState, useEffect, createContext } from 'react';
+import { useState, useEffect, useRef, createContext } from 'react';
 import { Routes, Route, NavLink } from 'react-router-dom';
 import axios from 'axios';
 import { initSocket, disconnectSocket } from './socket';
@@ -10,74 +10,100 @@ import Login    from './pages/Login';
 
 export const AuthContext = createContext(null);
 
-export default function App() {
-  const [token, setToken] = useState(localStorage.getItem('auth_token') || null);
-  const [needsAuth, setNeedsAuth] = useState(null); // null = loading
-  const [ready, setReady] = useState(false);
+// ═══════════════════════════════════════════════════════
+//  КЛЮЧЕВОЙ FIX: ставим заголовок СИНХРОННО при загрузке
+//  модуля — ДО любого рендера и useEffect
+// ═══════════════════════════════════════════════════════
+const savedToken = localStorage.getItem('auth_token');
+if (savedToken) {
+  axios.defaults.headers.common['x-auth-token'] = savedToken;
+}
 
-  // Проверяем, нужна ли авторизация
+export default function App() {
+  const [token, setToken]       = useState(savedToken || null);
+  const [needsAuth, setNeedsAuth] = useState(null); // null = loading
+  const [ready, setReady]       = useState(false);
+  const logoutRef               = useRef(null);
+
+  // ─── Глобальный перехватчик 401 → автоматический logout ───
+  useEffect(() => {
+    const id = axios.interceptors.response.use(
+      res => res,
+      err => {
+        // Если любой /api/* вернул 401 — токен протух
+        if (err.response?.status === 401 &&
+            err.config?.url !== '/api/auth/check' &&
+            err.config?.url !== '/api/auth/login') {
+          logoutRef.current?.();
+        }
+        return Promise.reject(err);
+      }
+    );
+    return () => axios.interceptors.response.eject(id);
+  }, []);
+
+  // ─── Проверяем авторизацию ОДИН раз при загрузке ───
   useEffect(() => {
     (async () => {
       try {
-        // Пытаемся проверить без токена на случай, если AUTH_PASSWORD не задан
-        const headers = token ? { 'x-auth-token': token } : {};
-        const { data } = await axios.get('/api/auth/check', { headers });
+        const { data } = await axios.get('/api/auth/check');
         setNeedsAuth(data.needsAuth);
-        
+
         if (!data.needsAuth) {
           // Пароль не задан — пускаем всех
-          setToken('no-auth');
-          localStorage.setItem('auth_token', 'no-auth');
+          const t = 'no-auth';
+          localStorage.setItem('auth_token', t);
+          axios.defaults.headers.common['x-auth-token'] = t;
+          initSocket(t);
+          setToken(t);
           setReady(true);
-        } else if (token && token !== 'no-auth') {
-          // Есть токен и пароль задан — проверяем
+
+        } else if (data.authenticated && token && token !== 'no-auth') {
+          // Токен валиден — инициализируем сокет ДО setReady
+          initSocket(token);
           setReady(true);
+
         } else {
-          // Нужна авторизация
+          // Токен отсутствует или невалиден — на логин
+          localStorage.removeItem('auth_token');
+          delete axios.defaults.headers.common['x-auth-token'];
+          setToken(null);
           setReady(false);
         }
       } catch (err) {
-        if (err.response?.status === 401) {
-          // Токен невалиден
-          setNeedsAuth(true);
-          setToken(null);
-          localStorage.removeItem('auth_token');
-          setReady(false);
-        } else {
-          // Сервер недоступен — попробуем показать логин
-          setNeedsAuth(true);
-          setReady(false);
-        }
+        // Сервер недоступен или другая ошибка
+        setNeedsAuth(true);
+        localStorage.removeItem('auth_token');
+        delete axios.defaults.headers.common['x-auth-token'];
+        setToken(null);
+        setReady(false);
       }
     })();
-  }, [token]);
+  }, []); // ← БЕЗ зависимости [token] — убираем повторные вызовы
 
-  // Настраиваем axios и socket при получении токена
-  useEffect(() => {
-    if (token && ready) {
-      axios.defaults.headers.common['x-auth-token'] = token;
-      initSocket(token);
-    }
-    return () => {
-      // Cleanup не нужен при смене токена
-    };
-  }, [token, ready]);
-
+  // ─── Логин: всё ставим СИНХРОННО до setState ───
   const handleLogin = (newToken) => {
     localStorage.setItem('auth_token', newToken);
+    axios.defaults.headers.common['x-auth-token'] = newToken;
+    initSocket(newToken);          // сокет готов ДО рендера Accounts
     setToken(newToken);
     setReady(true);
   };
 
+  // ─── Логаут ───
   const handleLogout = () => {
     localStorage.removeItem('auth_token');
+    delete axios.defaults.headers.common['x-auth-token'];
+    disconnectSocket();
     setToken(null);
     setReady(false);
-    disconnectSocket();
-    delete axios.defaults.headers.common['x-auth-token'];
+    setNeedsAuth(true);
   };
 
-  // Loading
+  // ref для перехватчика (чтобы не пересоздавать interceptor)
+  logoutRef.current = handleLogout;
+
+  // ─── Loading ───
   if (needsAuth === null) {
     return (
       <div className="login-overlay">
@@ -89,7 +115,7 @@ export default function App() {
     );
   }
 
-  // Нужна авторизация
+  // ─── Нужна авторизация ───
   if (needsAuth && !ready) {
     return <Login onLogin={handleLogin} />;
   }

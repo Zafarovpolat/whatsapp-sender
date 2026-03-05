@@ -426,7 +426,14 @@ app.post('/api/auth/login', (req, res) => {
 });
 
 app.get('/api/auth/check', (req, res) => {
-  res.json({ needsAuth: !!AUTH_PASSWORD, authenticated: true });
+  // Если пароль не задан — авторизация не нужна
+  if (!AUTH_PASSWORD) {
+    return res.json({ needsAuth: false, authenticated: true });
+  }
+  // Пароль задан — проверяем токен
+  const token = req.headers['x-auth-token'];
+  const isAuthenticated = !!(token && authTokens.has(token));
+  res.json({ needsAuth: true, authenticated: isAuthenticated });
 });
 
 app.get('/api/sessions', (req, res) => {

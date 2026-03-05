@@ -31,22 +31,36 @@ export default function Accounts() {
   const [proxy, setProxy]           = useState('');
   const [creating, setCreating]     = useState(false);
 
+  // ─── ref для интервала (чтобы остановить при 401) ───
+  const intervalRef = useRef(null);
+
   const load = async () => {
     try {
       const { data } = await axios.get('/api/sessions');
       if (Array.isArray(data)) setSessions(data);
     } catch (e) {
       console.error('[LOAD] Failed:', e.message);
+      // ─── FIX: при 401 останавливаем polling ───
+      if (e.response?.status === 401) {
+        console.warn('[LOAD] Unauthorized — stopping poll');
+        if (intervalRef.current) {
+          clearInterval(intervalRef.current);
+          intervalRef.current = null;
+        }
+      }
     }
   };
 
-  // Начальная загрузка + периодический опрос как страховка
+  // ─── Начальная загрузка + polling ───
   useEffect(() => {
     load();
-    const interval = setInterval(load, 5000);
-    return () => clearInterval(interval);
+    intervalRef.current = setInterval(load, 5000);
+    return () => {
+      if (intervalRef.current) clearInterval(intervalRef.current);
+    };
   }, []);
 
+  // ─── Socket-события ───
   useEffect(() => {
     const onConnect = () => {
       console.log('[SOCKET] Connected');
@@ -115,7 +129,6 @@ export default function Accounts() {
       </div>
 
       <div className="page-body">
-        {/* Мини-статистика — только если есть аккаунты */}
         {sessions.length > 0 && (
           <div className="acc-stats-bar">
             <div className="acc-stat-chip">
@@ -132,7 +145,6 @@ export default function Accounts() {
         )}
 
         <div className="acc-grid">
-          {/* Карточка добавления — всегда первая */}
           <div className="acc-card acc-card-add" onClick={() => setShowModal(true)}>
             <div className="acc-add-icon">
               <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
@@ -146,7 +158,6 @@ export default function Accounts() {
             )}
           </div>
 
-          {/* Карточки аккаунтов */}
           {sessions.map((s, i) => (
             <div key={s.id} className="acc-card acc-card-account" style={{ animationDelay: `${i * 0.05}s` }}>
               <div className="acc-card-body">
@@ -154,20 +165,16 @@ export default function Accounts() {
                   {getInitials(s.displayName)}
                   <span className={`acc-avatar-dot ${s.status}`} />
                 </div>
-
                 <div className="acc-card-name">{s.displayName}</div>
                 <div className="acc-card-phone">
                   {s.info?.phone ? `+${s.info.phone}` : STATUS_LABELS[s.status]}
                 </div>
-
                 <div className={`acc-badge ${s.status}`}>
                   {s.status === 'initializing' && <span className="acc-badge-spinner" />}
                   {STATUS_LABELS[s.status]}
                 </div>
-
                 {s.proxy && <div className="acc-proxy-tag">proxy: {s.proxy}</div>}
               </div>
-
               <div className="acc-card-actions">
                 {['qr','initializing','disconnected','auth_failure'].includes(s.status) && (
                   <button className="acc-action-btn acc-action-connect" onClick={() => setShowQrFor(s.id)}>
@@ -182,7 +189,6 @@ export default function Accounts() {
           ))}
         </div>
 
-        {/* ─── Модалка создания ─── */}
         {showModal && (
           <div className="modal-overlay" onClick={() => setShowModal(false)}>
             <div className="modal" onClick={e => e.stopPropagation()}>
@@ -211,7 +217,6 @@ export default function Accounts() {
           </div>
         )}
 
-        {/* ─── Модалка QR ─── */}
         {showQrFor && qrSession && (
           <div className="modal-overlay" onClick={() => setShowQrFor(null)}>
             <div className="modal qr-modal" onClick={e => e.stopPropagation()}>
@@ -219,7 +224,6 @@ export default function Accounts() {
                 <h3>{qrSession.displayName}</h3>
                 <button className="modal-close" onClick={() => setShowQrFor(null)}>&times;</button>
               </div>
-
               <div className="qr-modal-body">
                 {qrSession.status === 'initializing' && (
                   <div className="qr-state-center">
@@ -229,7 +233,6 @@ export default function Accounts() {
                     <div className="qr-dots"><span /><span /><span /></div>
                   </div>
                 )}
-
                 {qrSession.status === 'qr' && qrSession.qr && (
                   <div className="qr-scan-layout">
                     <div className="qr-steps">
@@ -243,7 +246,6 @@ export default function Accounts() {
                     <QrTimer qr={qrSession.qr} />
                   </div>
                 )}
-
                 {qrSession.status === 'authenticated' && (
                   <div className="qr-state-center">
                     <div className="qr-spinner" />
@@ -251,7 +253,6 @@ export default function Accounts() {
                     <div className="qr-state-sub">QR отсканирован, загружаем данные</div>
                   </div>
                 )}
-
                 {qrSession.status === 'ready' && (
                   <div className="qr-state-center">
                     <div className="qr-check-circle">
@@ -263,7 +264,6 @@ export default function Accounts() {
                     <div className="qr-state-sub">{qrSession.info?.phone ? `+${qrSession.info.phone}` : qrSession.displayName}</div>
                   </div>
                 )}
-
                 {(qrSession.status === 'disconnected' || qrSession.status === 'auth_failure') && (
                   <div className="qr-state-center">
                     <div className="qr-error-circle">!</div>
@@ -289,10 +289,7 @@ function QrTimer({ qr }) {
     if (ref.current) clearInterval(ref.current);
     ref.current = setInterval(() => {
       setSeconds(prev => {
-        if (prev <= 1) {
-          clearInterval(ref.current);
-          return 0;
-        }
+        if (prev <= 1) { clearInterval(ref.current); return 0; }
         return prev - 1;
       });
     }, 1000);
