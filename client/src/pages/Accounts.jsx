@@ -39,24 +39,31 @@ export default function Accounts() {
   useEffect(() => { load(); }, []);
 
   useEffect(() => {
-    socket.on('connect', () => console.log('[SOCKET] Connected'));
-    socket.on('connect_error', (err) => console.error('[SOCKET] Error:', err.message));
+    const onConnect = () => {
+      console.log('[SOCKET] Connected');
+      // При (пере)подключении — сразу загружаем актуальное состояние
+      load();
+    };
+    const onConnectError = (err) => console.error('[SOCKET] Error:', err.message);
 
-    socket.on('sessions:update', (data) => {
+    const onSessionsUpdate = (data) => {
       setSessions(data);
       if (showQrFor) {
         const s = data.find(x => x.id === showQrFor);
-        // Если аккаунт стал ready, закрываем модалку через 2 сек (чтобы пользователь увидел успех)
         if (s && s.status === 'ready') {
           setTimeout(() => setShowQrFor(null), 2000);
         }
       }
-    });
+    };
+
+    socket.on('connect', onConnect);
+    socket.on('connect_error', onConnectError);
+    socket.on('sessions:update', onSessionsUpdate);
 
     return () => {
-      socket.off('connect');
-      socket.off('connect_error');
-      socket.off('sessions:update');
+      socket.off('connect', onConnect);
+      socket.off('connect_error', onConnectError);
+      socket.off('sessions:update', onSessionsUpdate);
     };
   }, [showQrFor]);
 

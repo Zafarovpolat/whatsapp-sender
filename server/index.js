@@ -52,9 +52,18 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server, { 
   cors: { origin: '*' },
-  pingTimeout: 60000,
+  pingTimeout: 120000,
   pingInterval: 25000,
   transports: ['websocket', 'polling']
+});
+
+// При каждом подключении (и переподключении) — сразу шлём текущее состояние
+io.on('connection', (sock) => {
+  console.log(`[WS] Client connected: ${sock.id}`);
+  sock.emit('sessions:update', getSessionsList());
+  sock.on('disconnect', (reason) => {
+    console.log(`[WS] Client disconnected: ${sock.id} (${reason})`);
+  });
 });
 
 app.use(cors());
