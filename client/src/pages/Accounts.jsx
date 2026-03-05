@@ -32,22 +32,30 @@ export default function Accounts() {
   const [creating, setCreating]     = useState(false);
 
   const load = async () => {
-    const { data } = await axios.get('/api/sessions');
-    setSessions(data);
+    try {
+      const { data } = await axios.get('/api/sessions');
+      if (Array.isArray(data)) setSessions(data);
+    } catch (e) {
+      console.error('[LOAD] Failed:', e.message);
+    }
   };
 
-  useEffect(() => { load(); }, []);
+  // Начальная загрузка + периодический опрос как страховка
+  useEffect(() => {
+    load();
+    const interval = setInterval(load, 5000);
+    return () => clearInterval(interval);
+  }, []);
 
   useEffect(() => {
     const onConnect = () => {
       console.log('[SOCKET] Connected');
-      // При (пере)подключении — сразу загружаем актуальное состояние
       load();
     };
     const onConnectError = (err) => console.error('[SOCKET] Error:', err.message);
 
     const onSessionsUpdate = (data) => {
-      setSessions(data);
+      if (Array.isArray(data)) setSessions(data);
       if (showQrFor) {
         const s = data.find(x => x.id === showQrFor);
         if (s && s.status === 'ready') {

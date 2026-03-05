@@ -54,7 +54,7 @@ const io = new Server(server, {
   cors: { origin: '*' },
   pingTimeout: 120000,
   pingInterval: 25000,
-  transports: ['websocket', 'polling']
+  transports: ['polling', 'websocket']
 });
 
 // При каждом подключении (и переподключении) — сразу шлём текущее состояние
