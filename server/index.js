@@ -6,6 +6,7 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const crypto = require('crypto');
 
 // ═══════════════════════════════════════════════════════
 //  ГЛОБАЛЬНАЯ ЗАЩИТА ОТ ПАДЕНИЙ
@@ -57,6 +58,38 @@ const io = new Server(server, {
   transports: ['polling', 'websocket']
 });
 
+// ═══════════════════════════════════════════════════════
+//  АУТЕНТИФИКАЦИЯ
+// ═══════════════════════════════════════════════════════
+
+const AUTH_PASSWORD = process.env.AUTH_PASSWORD || '';
+const authTokens = new Set();
+
+function generateToken() {
+  return crypto.randomBytes(32).toString('hex');
+}
+
+function authMiddleware(req, res, next) {
+  if (!AUTH_PASSWORD) return next(); // Нет пароля — нет защиты
+  if (req.path === '/api/auth/login') return next();
+  
+  const token = req.headers['x-auth-token'];
+  if (!token || !authTokens.has(token)) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  next();
+}
+
+// Защита Socket.IO
+io.use((socket, next) => {
+  if (!AUTH_PASSWORD) return next();
+  const token = socket.handshake.auth?.token;
+  if (!token || !authTokens.has(token)) {
+    return next(new Error('Unauthorized'));
+  }
+  next();
+});
+
 // При каждом подключении (и переподключении) — сразу шлём текущее состояние
 io.on('connection', (sock) => {
   console.log(`[WS] Client connected: ${sock.id}`);
@@ -68,6 +101,7 @@ io.on('connection', (sock) => {
 
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
+app.use('/api', authMiddleware);
 
 const upload = multer({ dest: 'uploads/' });
 
@@ -375,6 +409,26 @@ function getNextReadyAccount(sessionIds, accountMsgCounts, msgsPerAccount, start
 //  API
 // ═══════════════════════════════════════════════════════
 
+// ─── АУТЕНТИФИКАЦИЯ ─────────────────────────────────────
+
+app.post('/api/auth/login', (req, res) => {
+  const { password } = req.body;
+  if (!AUTH_PASSWORD) {
+    // Пароль не задан — пускаем всех
+    return res.json({ token: 'no-auth', needsAuth: false });
+  }
+  if (password !== AUTH_PASSWORD) {
+    return res.status(401).json({ error: 'Неверный пароль' });
+  }
+  const token = generateToken();
+  authTokens.add(token);
+  res.json({ token, needsAuth: true });
+});
+
+app.get('/api/auth/check', (req, res) => {
+  res.json({ needsAuth: !!AUTH_PASSWORD, authenticated: true });
+});
+
 app.get('/api/sessions', (req, res) => {
   res.json(getSessionsList());
 });
@@ -566,11 +620,11 @@ app.post('/api/checker/start', (req, res) => {
       while (Date.now() - ws < 1500 && !controller.aborted) await sleep(200);
     }
 
-    const desktop = path.join(os.homedir(), 'Desktop');
-    const outPath = path.join(fs.existsSync(desktop) ? desktop : DATA_DIR, `valid_${Date.now()}.txt`);
+    const resultFilename = `valid_${Date.now()}.txt`;
+    const outPath = path.join(DATA_DIR, resultFilename);
     fs.writeFileSync(outPath, valid.join('\n'));
 
-    io.emit('checker:complete', { total: numbers.length, valid: valid.length });
+    io.emit('checker:complete', { total: numbers.length, valid: valid.length, filename: resultFilename });
     io.emit('checker:log', `[DONE] ${valid.length}/${numbers.length}`);
     checkerState = { running: false, controller: null };
   })();
@@ -665,6 +719,21 @@ app.post('/api/warmer/stop', (req, res) => {
 
 app.get('/api/status', (req, res) => {
   res.json({ sender: senderState.running, checker: checkerState.running, warmer: warmerState.running });
+});
+
+// ─── СКАЧИВАНИЕ РЕЗУЛЬТАТОВ ─────────────────────────────
+
+app.get('/api/download/:filename', (req, res) => {
+  const filename = req.params.filename;
+  // Защита от path traversal
+  if (filename.includes('..') || filename.includes('/') || filename.includes('\\')) {
+    return res.status(400).json({ error: 'Invalid filename' });
+  }
+  const filePath = path.join(DATA_DIR, filename);
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).json({ error: 'Файл не найден' });
+  }
+  res.download(filePath, filename);
 });
 
 // ═══════════════════════════════════════════════════════

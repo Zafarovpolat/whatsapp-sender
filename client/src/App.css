@@ -1552,3 +1552,76 @@ body {
     gap: 8px;
   }
 }
+
+/* ─── Login Page ────────────────────────────────────── */
+.login-overlay {
+  position: fixed;
+  inset: 0;
+  background: var(--bg-main);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999;
+}
+
+.login-overlay::before {
+  content: '';
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  height: 220px;
+  background: linear-gradient(135deg, #00a884 0%, #02d39a 100%);
+  z-index: 0;
+}
+
+.login-card {
+  background: var(--bg-white);
+  border-radius: var(--radius-md);
+  padding: 40px 36px;
+  width: 100%;
+  max-width: 380px;
+  box-shadow: var(--shadow-lg);
+  position: relative;
+  z-index: 1;
+  animation: cardIn 0.4s ease-out;
+}
+
+.login-icon {
+  text-align: center;
+  margin-bottom: 16px;
+}
+
+.login-title {
+  text-align: center;
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin-bottom: 6px;
+  letter-spacing: -0.03em;
+}
+
+.login-subtitle {
+  text-align: center;
+  font-size: 14px;
+  color: var(--text-secondary);
+  margin-bottom: 24px;
+  font-weight: 400;
+}
+
+.login-error {
+  background: #fde8ec;
+  color: var(--red);
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  font-weight: 500;
+  margin-bottom: 14px;
+  text-align: center;
+  animation: fadeIn 0.3s ease;
+}
+
+.login-btn {
+  width: 100%;
+  padding: 12px;
+  font-size: 15px;
+  margin-top: 4px;
+}

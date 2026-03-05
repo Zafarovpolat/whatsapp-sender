@@ -11,16 +11,36 @@ export default function Checker() {
   const [running, setRunning] = useState(false);
   const [logs, setLogs] = useState([]);
   const [progress, setProgress] = useState({ checked: 0, total: 0, valid: 0 });
+  const [resultFile, setResultFile] = useState(null);
   const logRef = useRef();
 
   useEffect(() => {
     axios.get('/api/sessions').then(r => setSessions(r.data));
-    socket.on('sessions:update', setSessions);
-    socket.on('checker:log', m => setLogs(p => [...p, m]));
-    socket.on('checker:progress', setProgress);
-    socket.on('checker:complete', () => setRunning(false));
-    socket.on('checker:error', m => { setLogs(p => [...p, `[ERR] ${m}`]); setRunning(false); });
-    return () => { ['sessions:update','checker:log','checker:progress','checker:complete','checker:error'].forEach(e => socket.off(e)); };
+
+    const onUpdate = (data) => setSessions(data);
+    const onLog = (m) => setLogs(p => [...p, m]);
+    const onProgress = (data) => setProgress(data);
+    const onComplete = (data) => {
+      setRunning(false);
+      if (data.filename) {
+        setResultFile(data.filename);
+      }
+    };
+    const onError = (m) => { setLogs(p => [...p, `[ERR] ${m}`]); setRunning(false); };
+
+    if (socket) {
+      socket.on('sessions:update', onUpdate);
+      socket.on('checker:log', onLog);
+      socket.on('checker:progress', onProgress);
+      socket.on('checker:complete', onComplete);
+      socket.on('checker:error', onError);
+    }
+
+    return () => {
+      if (socket) {
+        ['sessions:update','checker:log','checker:progress','checker:complete','checker:error'].forEach(e => socket.off(e));
+      }
+    };
   }, []);
 
   useEffect(() => { logRef.current && (logRef.current.scrollTop = logRef.current.scrollHeight); }, [logs]);
@@ -35,11 +55,33 @@ export default function Checker() {
   const start = async () => {
     if (!selectedId) return alert('Выберите аккаунт');
     if (!filePath) return alert('Загрузите файл');
-    setLogs([]); setProgress({ checked: 0, total: numCount, valid: 0 }); setRunning(true);
+    setLogs([]); setProgress({ checked: 0, total: numCount, valid: 0 }); setRunning(true); setResultFile(null);
     await axios.post('/api/checker/start', { sessionId: selectedId, numbersFilePath: filePath });
   };
 
   const stop = async () => { await axios.post('/api/checker/stop'); setRunning(false); };
+
+  const download = () => {
+    if (!resultFile) return;
+    const token = localStorage.getItem('auth_token') || '';
+    // Скачиваем через fetch с токеном
+    fetch(`/api/download/${resultFile}`, {
+      headers: { 'x-auth-token': token }
+    })
+      .then(res => res.blob())
+      .then(blob => {
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = resultFile;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        window.URL.revokeObjectURL(url);
+      })
+      .catch(() => alert('Ошибка скачивания'));
+  };
+
   const ready = sessions.filter(s => s.status === 'ready');
 
   return (
@@ -82,7 +124,19 @@ export default function Checker() {
                 <div className="stat"><div className="value">{progress.total}</div><div className="label">Всего</div></div>
               </div>
               {progress.total > 0 && <div className="progress-bar-container"><div className="progress-bar-fill" style={{ width: `${(progress.checked / progress.total) * 100}%` }} /></div>}
-              <div className="hint">Валидные номера сохранятся на рабочий стол</div>
+              
+              {resultFile ? (
+                <button className="btn btn-primary" onClick={download} style={{ marginTop: 12, width: '100%' }}>
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ marginRight: 8, verticalAlign: 'middle' }}>
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                    <polyline points="7 10 12 15 17 10"/>
+                    <line x1="12" y1="15" x2="12" y2="3"/>
+                  </svg>
+                  Скачать результат ({progress.valid} номеров)
+                </button>
+              ) : (
+                <div className="hint">Валидные номера можно будет скачать после проверки</div>
+              )}
             </div>
           </div>
         </div>
