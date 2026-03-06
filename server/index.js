@@ -70,7 +70,7 @@ function generateToken() {
 }
 
 function authMiddleware(req, res, next) {
-  if (!AUTH_PASSWORD) return next(); // Нет пароля — нет защиты
+  if (!AUTH_PASSWORD) return next();
   if (req.path === '/auth/login' || req.path === '/auth/check') return next();
   
   const token = req.headers['x-auth-token'];
@@ -90,7 +90,6 @@ io.use((socket, next) => {
   next();
 });
 
-// При каждом подключении (и переподключении) — сразу шлём текущее состояние
 io.on('connection', (sock) => {
   console.log(`[WS] Client connected: ${sock.id}`);
   sock.emit('sessions:update', getSessionsList());
@@ -106,6 +105,7 @@ app.use('/api', authMiddleware);
 const upload = multer({ dest: 'uploads/' });
 
 const DATA_DIR = path.join(__dirname, 'data');
+const AUTH_DATA_DIR = path.join(DATA_DIR, '.wwebjs_auth');   // ← ДОБАВЛЕНО: отдельная константа
 const SESSIONS_FILE = path.join(DATA_DIR, 'sessions.json');
 
 ['data', 'uploads'].forEach(dir => {
@@ -123,6 +123,107 @@ let warmerState  = { running: false, controller: null };
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 // ═══════════════════════════════════════════════════════
+//  ДОБАВЛЕНО: ОЧИСТКА ФАЙЛОВ CHROMIUM
+// ═══════════════════════════════════════════════════════
+
+/**
+ * Удаляет stale lock-файлы Chromium (остаются после краша/рестарта)
+ */
+function cleanupStaleLocks(sessionId) {
+  const profileDir = path.join(AUTH_DATA_DIR, `session-${sessionId}`);
+  if (!fs.existsSync(profileDir)) return;
+
+  const lockFiles = ['SingletonLock', 'SingletonCookie', 'SingletonSocket'];
+
+  function removeLocks(dir) {
+    lockFiles.forEach(f => {
+      const p = path.join(dir, f);
+      try {
+        if (fs.existsSync(p)) {
+          fs.unlinkSync(p);
+          console.log(`[CLEANUP] Removed lock: ${p}`);
+        }
+      } catch (e) {}
+    });
+  }
+
+  removeLocks(profileDir);
+
+  // Также вложенные директории
+  try {
+    fs.readdirSync(profileDir, { withFileTypes: true })
+      .filter(d => d.isDirectory())
+      .forEach(d => removeLocks(path.join(profileDir, d.name)));
+  } catch (e) {}
+}
+
+/**
+ * Чистит кэш-директории Chromium (~200-500MB на сессию)
+ */
+function cleanupCacheFiles(sessionId) {
+  const profileDir = path.join(AUTH_DATA_DIR, `session-${sessionId}`);
+  if (!fs.existsSync(profileDir)) return;
+
+  const cacheDirs = [
+    'Cache', 'Code Cache', 'GPUCache', 'GrShaderCache',
+    'ShaderCache', 'Service Worker', 'blob_storage',
+    'IndexedDB', 'Local Storage', 'Session Storage'
+  ];
+
+  function cleanDir(baseDir) {
+    cacheDirs.forEach(dir => {
+      const p = path.join(baseDir, dir);
+      try {
+        if (fs.existsSync(p)) {
+          fs.rmSync(p, { recursive: true, force: true });
+        }
+      } catch (e) {}
+    });
+  }
+
+  cleanDir(profileDir);
+  const defaultDir = path.join(profileDir, 'Default');
+  if (fs.existsSync(defaultDir)) cleanDir(defaultDir);
+
+  console.log(`[CLEANUP] Caches cleared for ${sessionId}`);
+}
+
+/**
+ * Полностью удаляет директорию профиля сессии
+ */
+function removeSessionDir(sessionId) {
+  const profileDir = path.join(AUTH_DATA_DIR, `session-${sessionId}`);
+  try {
+    if (fs.existsSync(profileDir)) {
+      fs.rmSync(profileDir, { recursive: true, force: true });
+      console.log(`[CLEANUP] Removed dir: session-${sessionId}`);
+    }
+  } catch (e) {
+    console.error(`[CLEANUP] Failed:`, e.message);
+  }
+}
+
+/**
+ * Чистит ВСЕ lock-файлы и кэши при старте сервера
+ */
+function cleanupAllOnStartup() {
+  if (!fs.existsSync(AUTH_DATA_DIR)) return;
+  console.log('[CLEANUP] Cleaning stale locks and caches...');
+  try {
+    const dirs = fs.readdirSync(AUTH_DATA_DIR, { withFileTypes: true })
+      .filter(d => d.isDirectory() && d.name.startsWith('session-'));
+    dirs.forEach(d => {
+      const sessId = d.name.replace('session-', '');
+      cleanupStaleLocks(sessId);
+      cleanupCacheFiles(sessId);
+    });
+    console.log(`[CLEANUP] Done. Processed ${dirs.length} session dirs`);
+  } catch (e) {
+    console.error('[CLEANUP] Error:', e.message);
+  }
+}
+
+// ═══════════════════════════════════════════════════════
 //  СЕССИИ: сохранение/загрузка
 // ═══════════════════════════════════════════════════════
 
@@ -130,7 +231,6 @@ function saveSessions() {
   try {
     const data = [];
     sessions.forEach(s => {
-      // Сохраняем ТОЛЬКО авторизованные сессии
       if (s.status === 'ready') {
         data.push({
           id: s.id,
@@ -165,7 +265,7 @@ function loadSavedSessions() {
       if (sess.id && sess.displayName) {
         setTimeout(() => {
           createSession(sess.id, sess.displayName, sess.proxy);
-        }, index * 5000); // 5 секунд между сессиями
+        }, index * 5000);
       }
     });
   } catch (err) {
@@ -210,6 +310,10 @@ function createSession(sessionId, displayName, proxy) {
 
   console.log(`[CREATE] ${displayName}`);
 
+  // ═══ ДОБАВЛЕНО: чистим lock-файлы и кэш ПЕРЕД запуском ═══
+  cleanupStaleLocks(sessionId);
+  cleanupCacheFiles(sessionId);
+
   const sessionData = {
     id: sessionId,
     displayName,
@@ -224,26 +328,8 @@ function createSession(sessionId, displayName, proxy) {
   broadcastSessions();
 
   try {
+    // ═══ ИСПРАВЛЕНО: один массив args, с прокси, с отключением кэша ═══
     const puppeteerArgs = [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-gpu',
-      '--no-first-run',
-      '--disable-extensions'
-    ];
-
-    if (proxy) puppeteerArgs.push(`--proxy-server=${proxy}`);
-
-const client = new Client({
-  authStrategy: new LocalAuth({ 
-    clientId: sessionId,
-    dataPath: path.join(DATA_DIR, '.wwebjs_auth')
-  }),
-  puppeteer: {
-    headless: true,
-    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
-    args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
@@ -254,17 +340,33 @@ const client = new Client({
       '--disable-default-apps',
       '--disable-sync',
       '--disable-translate',
-      '--js-flags="--max-old-space-size=256"'
-    ],
-    timeout: 120000
-  },
-  qrMaxRetries: 10
-});
+      '--disk-cache-size=0',
+      '--media-cache-size=0',
+      '--js-flags=--max-old-space-size=256'
+    ];
+
+    if (proxy) puppeteerArgs.push(`--proxy-server=${proxy}`);
+
+    const client = new Client({
+      authStrategy: new LocalAuth({ 
+        clientId: sessionId,
+        dataPath: AUTH_DATA_DIR
+      }),
+      puppeteer: {
+        headless: true,
+        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
+        args: puppeteerArgs,   // ← ИСПРАВЛЕНО: был хардкод, прокси не применялся
+        timeout: 120000
+      },
+      qrMaxRetries: 5          // ← ИЗМЕНЕНО: было 10, уменьшено чтобы не спамить
+    });
 
     sessionData.client = client;
 
     // ─── QR ─────────────────────────────────────────
     client.on('qr', (qr) => {
+      // ═══ ДОБАВЛЕНО: guard — не обрабатываем если уже отключен ═══
+      if (sessionData.status === 'disconnected' || sessionData.status === 'auth_failure') return;
       console.log(`[QR] ${displayName}`);
       sessionData.status = 'qr';
       sessionData.qr = qr;
@@ -273,12 +375,13 @@ const client = new Client({
 
     // ─── Authenticated ──────────────────────────────
     client.on('authenticated', () => {
+      // ═══ ДОБАВЛЕНО: guard — не обрабатываем повторно ═══
+      if (sessionData.status === 'authenticated' || sessionData.status === 'ready') return;
       console.log(`[AUTH] ${displayName}`);
       sessionData.status = 'authenticated';
       sessionData.qr = null;
       broadcastSessions();
       
-      // Таймер на случай если ready не сработает
       setTimeout(() => {
         if (sessionData.status === 'authenticated') {
           console.log(`[AUTH-TIMEOUT] ${displayName} - forcing ready check`);
@@ -297,7 +400,7 @@ const client = new Client({
             console.log(`[AUTH-TIMEOUT-ERR] ${e.message}`);
           }
         }
-      }, 30000); // 30 секунд таймаут
+      }, 30000);
     });
 
     // ─── Auth Failure ───────────────────────────────
@@ -310,6 +413,8 @@ const client = new Client({
 
     // ─── Ready ──────────────────────────────────────
     client.on('ready', () => {
+      // ═══ ДОБАВЛЕНО: guard ═══
+      if (sessionData.status === 'ready') return;
       console.log(`[READY] ${displayName}`);
       sessionData.status = 'ready';
       sessionData.qr = null;
@@ -356,8 +461,11 @@ const client = new Client({
 
     // ─── Disconnected ───────────────────────────────
     client.on('disconnected', (reason) => {
+      // ═══ ДОБАВЛЕНО: guard ═══
+      if (sessionData.status === 'disconnected') return;
       console.log(`[DC] ${displayName}:`, reason);
       sessionData.status = 'disconnected';
+      sessionData.qr = null;
       broadcastSessions();
     });
 
@@ -382,13 +490,17 @@ const client = new Client({
     client.initialize().catch((err) => {
       console.error(`[INIT-ERR] ${displayName}:`, err.message);
       sessionData.status = 'auth_failure';
+      sessionData.qr = null;
       broadcastSessions();
+      // ═══ ДОБАВЛЕНО: чистим кэш при ошибке ═══
+      cleanupCacheFiles(sessionId);
     });
 
   } catch (err) {
     console.error(`[CREATE-ERR] ${displayName}:`, err.message);
     sessionData.status = 'auth_failure';
     broadcastSessions();
+    cleanupCacheFiles(sessionId);
   }
 }
 
@@ -414,7 +526,6 @@ function getNextReadyAccount(sessionIds, accountMsgCounts, msgsPerAccount, start
 app.post('/api/auth/login', (req, res) => {
   const { password } = req.body;
   if (!AUTH_PASSWORD) {
-    // Пароль не задан — пускаем всех
     return res.json({ token: 'no-auth', needsAuth: false });
   }
   if (password !== AUTH_PASSWORD) {
@@ -426,11 +537,9 @@ app.post('/api/auth/login', (req, res) => {
 });
 
 app.get('/api/auth/check', (req, res) => {
-  // Если пароль не задан — авторизация не нужна
   if (!AUTH_PASSWORD) {
     return res.json({ needsAuth: false, authenticated: true });
   }
-  // Пароль задан — проверяем токен
   const token = req.headers['x-auth-token'];
   const isAuthenticated = !!(token && authTokens.has(token));
   res.json({ needsAuth: true, authenticated: isAuthenticated });
@@ -459,17 +568,61 @@ app.post('/api/sessions', (req, res) => {
   res.json({ message: 'Создание...', id: sessionId });
 });
 
+// ═══ ДОБАВЛЕНО: эндпоинт переподключения ═══
+app.post('/api/sessions/:id/reconnect', async (req, res) => {
+  const session = sessions.get(req.params.id);
+  if (!session) return res.status(404).json({ error: 'Не найдено' });
+
+  const { displayName, proxy, id: sessionId } = session;
+
+  console.log(`[RECONNECT] ${displayName}...`);
+
+  // Уничтожаем старый клиент
+  try {
+    if (session.client) {
+      await session.client.destroy().catch(() => {});
+    }
+  } catch (e) {
+    console.log(`[RECONNECT] Destroy warning: ${e.message}`);
+  }
+
+  // Удаляем из Map
+  sessions.delete(sessionId);
+  broadcastSessions();
+
+  // Чистим lock-файлы и кэш
+  cleanupStaleLocks(sessionId);
+  cleanupCacheFiles(sessionId);
+
+  // Ждём чтобы процессы Chromium завершились
+  await sleep(2000);
+
+  // Пересоздаём сессию
+  createSession(sessionId, displayName, proxy);
+
+  res.json({ message: 'Переподключение...' });
+});
+
+// ═══ ИЗМЕНЕНО: при удалении чистим файлы на диске ═══
 app.delete('/api/sessions/:id', async (req, res) => {
   const session = sessions.get(req.params.id);
   if (!session) return res.status(404).json({ error: 'Не найдено' });
 
+  const sessionId = req.params.id;
+
   try {
-    if (session.client) await session.client.destroy();
+    if (session.client) await session.client.destroy().catch(() => {});
   } catch (e) {}
 
-  sessions.delete(req.params.id);
+  sessions.delete(sessionId);
   broadcastSessions();
   saveSessions();
+
+  // ═══ ДОБАВЛЕНО: удаляем директорию профиля ═══
+  setTimeout(() => {
+    removeSessionDir(sessionId);
+  }, 1000);
+
   res.json({ message: 'Удалено' });
 });
 
@@ -732,7 +885,6 @@ app.get('/api/status', (req, res) => {
 
 app.get('/api/download/:filename', (req, res) => {
   const filename = req.params.filename;
-  // Защита от path traversal
   if (filename.includes('..') || filename.includes('/') || filename.includes('\\')) {
     return res.status(400).json({ error: 'Invalid filename' });
   }
@@ -747,12 +899,10 @@ app.get('/api/download/:filename', (req, res) => {
 //  СТАРТ
 // ═══════════════════════════════════════════════════════
 
-// Раздача статики (билд клиента)
 const clientBuildPath = path.join(__dirname, '..', 'client', 'dist');
 if (fs.existsSync(clientBuildPath)) {
   app.use(express.static(clientBuildPath));
   
-  // Все остальные запросы → index.html (SPA)
   app.get('*', (req, res) => {
     if (!req.path.startsWith('/api') && !req.path.startsWith('/socket.io')) {
       res.sendFile(path.join(clientBuildPath, 'index.html'));
@@ -766,5 +916,7 @@ const PORT = process.env.PORT || 3001;
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`\n=== Server: http://localhost:${PORT} ===\n`);
-  setTimeout(loadSavedSessions, 2000);
+  // ═══ ДОБАВЛЕНО: чистим всё при старте ═══
+  cleanupAllOnStartup();
+  setTimeout(loadSavedSessions, 3000);
 });

@@ -24,14 +24,14 @@ function getAvatarColor(name) {
 }
 
 export default function Accounts() {
-  const [sessions, setSessions]     = useState([]);
-  const [showModal, setShowModal]   = useState(false);
-  const [showQrFor, setShowQrFor]   = useState(null);
-  const [newName, setNewName]       = useState('');
-  const [proxy, setProxy]           = useState('');
-  const [creating, setCreating]     = useState(false);
+  const [sessions, setSessions]         = useState([]);
+  const [showModal, setShowModal]       = useState(false);
+  const [showQrFor, setShowQrFor]       = useState(null);
+  const [newName, setNewName]           = useState('');
+  const [proxy, setProxy]              = useState('');
+  const [creating, setCreating]        = useState(false);
+  const [reconnecting, setReconnecting] = useState(null);  // ← ДОБАВЛЕНО
 
-  // ─── ref для интервала (чтобы остановить при 401) ───
   const intervalRef = useRef(null);
 
   const load = async () => {
@@ -40,7 +40,6 @@ export default function Accounts() {
       if (Array.isArray(data)) setSessions(data);
     } catch (e) {
       console.error('[LOAD] Failed:', e.message);
-      // ─── FIX: при 401 останавливаем polling ───
       if (e.response?.status === 401) {
         console.warn('[LOAD] Unauthorized — stopping poll');
         if (intervalRef.current) {
@@ -51,7 +50,6 @@ export default function Accounts() {
     }
   };
 
-  // ─── Начальная загрузка + polling ───
   useEffect(() => {
     load();
     intervalRef.current = setInterval(load, 5000);
@@ -60,7 +58,6 @@ export default function Accounts() {
     };
   }, []);
 
-  // ─── Socket-события ───
   useEffect(() => {
     const onConnect = () => {
       console.log('[SOCKET] Connected');
@@ -103,6 +100,19 @@ export default function Accounts() {
       alert(e.response?.data?.error || 'Ошибка');
     } finally {
       setCreating(false);
+    }
+  };
+
+  // ═══ ДОБАВЛЕНО: настоящее переподключение через API ═══
+  const reconnect = async (id) => {
+    setReconnecting(id);
+    try {
+      await axios.post(`/api/sessions/${id}/reconnect`);
+      setShowQrFor(id);
+    } catch (e) {
+      alert(e.response?.data?.error || 'Ошибка переподключения');
+    } finally {
+      setReconnecting(null);
     }
   };
 
@@ -175,12 +185,32 @@ export default function Accounts() {
                 </div>
                 {s.proxy && <div className="acc-proxy-tag">proxy: {s.proxy}</div>}
               </div>
+
+              {/* ═══ ИЗМЕНЕНО: разделили кнопки по статусам ═══ */}
               <div className="acc-card-actions">
-                {['qr','initializing','disconnected','auth_failure'].includes(s.status) && (
+                {/* QR / Статус — просто открыть модалку */}
+                {s.status === 'qr' && (
                   <button className="acc-action-btn acc-action-connect" onClick={() => setShowQrFor(s.id)}>
-                    {s.status === 'qr' ? 'Показать QR' : s.status === 'initializing' ? 'Статус' : 'Переподключить'}
+                    Показать QR
                   </button>
                 )}
+                {s.status === 'initializing' && (
+                  <button className="acc-action-btn acc-action-connect" onClick={() => setShowQrFor(s.id)}>
+                    Статус
+                  </button>
+                )}
+
+                {/* Переподключение — через API */}
+                {['disconnected', 'auth_failure'].includes(s.status) && (
+                  <button
+                    className="acc-action-btn acc-action-connect"
+                    onClick={() => reconnect(s.id)}
+                    disabled={reconnecting === s.id}
+                  >
+                    {reconnecting === s.id ? 'Подключение...' : 'Переподключить'}
+                  </button>
+                )}
+
                 <button className="acc-action-btn acc-action-delete" onClick={() => remove(s.id)}>
                   Удалить
                 </button>
@@ -268,7 +298,8 @@ export default function Accounts() {
                   <div className="qr-state-center">
                     <div className="qr-error-circle">!</div>
                     <div className="qr-state-title">Ошибка подключения</div>
-                    <div className="qr-state-sub">Попробуйте удалить аккаунт и создать заново</div>
+                    {/* ═══ ИЗМЕНЕНО: текст подсказки ═══ */}
+                    <div className="qr-state-sub">Закройте окно и нажмите «Переподключить»</div>
                   </div>
                 )}
               </div>
@@ -284,17 +315,17 @@ function QrTimer({ qr }) {
   const [seconds, setSeconds] = useState(90);
   const ref = useRef();
 
-  useEffect(() => {
-    setSeconds(90);
-    if (ref.current) clearInterval(ref.current);
-    ref.current = setInterval(() => {
-      setSeconds(prev => {
-        if (prev <= 1) { clearInterval(ref.current); return 0; }
-        return prev - 1;
-      });
-    }, 1000);
-    return () => clearInterval(ref.current);
-  }, [qr]);
+useEffect(() => {
+  setSeconds(90);
+  if (ref.current) clearInterval(ref.current);
+  ref.current = setInterval(() => {
+    setSeconds(prev => {
+      if (prev <= 1) { clearInterval(ref.current); return 0; }
+      return prev - 1;
+    });
+  }, 1000);
+  return () => clearInterval(ref.current);
+}, [qr, setSeconds]);  // ← добавил setSeconds
 
   return (
     <div className="qr-timer">
