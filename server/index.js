@@ -45,6 +45,14 @@ try {
   generateRandomMessage = () => 'Test message';
 }
 
+let proxyChain;
+try {
+  proxyChain = require('proxy-chain');
+  console.log('[OK] proxy-chain loaded');
+} catch (err) {
+  console.warn('[WARN] proxy-chain not installed — proxy auth will not work');
+}
+
 // ═══════════════════════════════════════════════════════
 //  EXPRESS
 // ═══════════════════════════════════════════════════════
@@ -80,7 +88,6 @@ function authMiddleware(req, res, next) {
   next();
 }
 
-// Защита Socket.IO
 io.use((socket, next) => {
   if (!AUTH_PASSWORD) return next();
   const token = socket.handshake.auth?.token;
@@ -105,7 +112,7 @@ app.use('/api', authMiddleware);
 const upload = multer({ dest: 'uploads/' });
 
 const DATA_DIR = path.join(__dirname, 'data');
-const AUTH_DATA_DIR = path.join(DATA_DIR, '.wwebjs_auth');   // ← ДОБАВЛЕНО: отдельная константа
+const AUTH_DATA_DIR = path.join(DATA_DIR, '.wwebjs_auth');
 const SESSIONS_FILE = path.join(DATA_DIR, 'sessions.json');
 
 ['data', 'uploads'].forEach(dir => {
@@ -123,14 +130,9 @@ let warmerState  = { running: false, controller: null };
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 // ═══════════════════════════════════════════════════════
-//  ДОБАВЛЕНО: ОЧИСТКА ФАЙЛОВ CHROMIUM
+//  ОЧИСТКА ФАЙЛОВ CHROMIUM
 // ═══════════════════════════════════════════════════════
 
-/**
- * Удаляет stale lock-файлы Chromium (остаются после краша/рестарта).
- * ВАЖНО: SingletonLock — это SYMLINK. fs.existsSync не видит битые symlinks!
- * Поэтому используем fs.lstatSync который проверяет сам symlink, а не его цель.
- */
 function cleanupStaleLocks(sessionId) {
   const profileDir = path.join(AUTH_DATA_DIR, `session-${sessionId}`);
   if (!fs.existsSync(profileDir)) return;
@@ -141,19 +143,15 @@ function cleanupStaleLocks(sessionId) {
     lockFiles.forEach(f => {
       const p = path.join(dir, f);
       try {
-        // lstatSync НЕ следует по symlink — видит битые ссылки
         fs.lstatSync(p);
         fs.unlinkSync(p);
         console.log(`[CLEANUP] Removed lock: ${p}`);
-      } catch (e) {
-        // Файл не существует — ок
-      }
+      } catch (e) {}
     });
   }
 
   removeLocks(profileDir);
 
-  // Также вложенные директории (Default, Profile 1, ...)
   try {
     fs.readdirSync(profileDir, { withFileTypes: true })
       .filter(d => {
@@ -163,9 +161,6 @@ function cleanupStaleLocks(sessionId) {
   } catch (e) {}
 }
 
-/**
- * Чистит кэш-директории Chromium (~200-500MB на сессию)
- */
 function cleanupCacheFiles(sessionId) {
   const profileDir = path.join(AUTH_DATA_DIR, `session-${sessionId}`);
   if (!fs.existsSync(profileDir)) return;
@@ -194,9 +189,6 @@ function cleanupCacheFiles(sessionId) {
   console.log(`[CLEANUP] Caches cleared for ${sessionId}`);
 }
 
-/**
- * Полностью удаляет директорию профиля сессии
- */
 function removeSessionDir(sessionId) {
   const profileDir = path.join(AUTH_DATA_DIR, `session-${sessionId}`);
   try {
@@ -209,9 +201,6 @@ function removeSessionDir(sessionId) {
   }
 }
 
-/**
- * Чистит ВСЕ lock-файлы и кэши при старте сервера
- */
 function cleanupAllOnStartup() {
   if (!fs.existsSync(AUTH_DATA_DIR)) return;
   console.log('[CLEANUP] Cleaning stale locks and caches...');
@@ -308,7 +297,8 @@ function broadcastSessions() {
   } catch (e) {}
 }
 
-function createSession(sessionId, displayName, proxy) {
+// ═══ ИЗМЕНЕНО: async для поддержки proxy-chain ═══
+async function createSession(sessionId, displayName, proxy) {
   if (sessions.has(sessionId)) {
     console.log(`[SKIP] ${sessionId} exists`);
     return;
@@ -316,7 +306,6 @@ function createSession(sessionId, displayName, proxy) {
 
   console.log(`[CREATE] ${displayName}`);
 
-  // ═══ ДОБАВЛЕНО: чистим lock-файлы и кэш ПЕРЕД запуском ═══
   cleanupStaleLocks(sessionId);
   cleanupCacheFiles(sessionId);
 
@@ -327,14 +316,28 @@ function createSession(sessionId, displayName, proxy) {
     status: 'initializing',
     info: null,
     proxy: proxy || null,
-    qr: null
+    qr: null,
+    anonymizedProxy: null   // ← для proxy-chain
   };
 
   sessions.set(sessionId, sessionData);
   broadcastSessions();
 
   try {
-    // ═══ ИСПРАВЛЕНО: один массив args, с прокси, с отключением кэша ═══
+    // ═══ Прокси с авторизацией через proxy-chain ═══
+    let actualProxy = proxy;
+
+    if (proxy && proxy.includes('@') && proxyChain) {
+      try {
+        const anonymized = await proxyChain.anonymizeProxy(proxy);
+        sessionData.anonymizedProxy = anonymized;
+        actualProxy = anonymized;
+        console.log(`[PROXY] Auth proxy anonymized: ${proxy.replace(/\/\/.*@/, '//***@')} -> ${anonymized}`);
+      } catch (e) {
+        console.error(`[PROXY] Anonymize failed: ${e.message}`);
+      }
+    }
+
     const puppeteerArgs = [
       '--no-sandbox',
       '--disable-setuid-sandbox',
@@ -351,7 +354,7 @@ function createSession(sessionId, displayName, proxy) {
       '--js-flags=--max-old-space-size=256'
     ];
 
-    if (proxy) puppeteerArgs.push(`--proxy-server=${proxy}`);
+    if (actualProxy) puppeteerArgs.push(`--proxy-server=${actualProxy}`);
 
     const client = new Client({
       authStrategy: new LocalAuth({ 
@@ -361,17 +364,15 @@ function createSession(sessionId, displayName, proxy) {
       puppeteer: {
         headless: true,
         executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
-        args: puppeteerArgs,   // ← ИСПРАВЛЕНО: был хардкод, прокси не применялся
+        args: puppeteerArgs,
         timeout: 120000
       },
-      qrMaxRetries: 5          // ← ИЗМЕНЕНО: было 10, уменьшено чтобы не спамить
+      qrMaxRetries: 5
     });
 
     sessionData.client = client;
 
-    // ─── QR ─────────────────────────────────────────
     client.on('qr', (qr) => {
-      // ═══ ДОБАВЛЕНО: guard — не обрабатываем если уже отключен ═══
       if (sessionData.status === 'disconnected' || sessionData.status === 'auth_failure') return;
       console.log(`[QR] ${displayName}`);
       sessionData.status = 'qr';
@@ -379,9 +380,7 @@ function createSession(sessionId, displayName, proxy) {
       broadcastSessions();
     });
 
-    // ─── Authenticated ──────────────────────────────
     client.on('authenticated', () => {
-      // ═══ ДОБАВЛЕНО: guard — не обрабатываем повторно ═══
       if (sessionData.status === 'authenticated' || sessionData.status === 'ready') return;
       console.log(`[AUTH] ${displayName}`);
       sessionData.status = 'authenticated';
@@ -409,7 +408,6 @@ function createSession(sessionId, displayName, proxy) {
       }, 30000);
     });
 
-    // ─── Auth Failure ───────────────────────────────
     client.on('auth_failure', (msg) => {
       console.error(`[AUTH-FAIL] ${displayName}:`, msg);
       sessionData.status = 'auth_failure';
@@ -417,9 +415,7 @@ function createSession(sessionId, displayName, proxy) {
       broadcastSessions();
     });
 
-    // ─── Ready ──────────────────────────────────────
     client.on('ready', () => {
-      // ═══ ДОБАВЛЕНО: guard ═══
       if (sessionData.status === 'ready') return;
       console.log(`[READY] ${displayName}`);
       sessionData.status = 'ready';
@@ -436,12 +432,10 @@ function createSession(sessionId, displayName, proxy) {
       saveSessions();
     });
 
-    // ─── Loading Screen ─────────────────────────────
     client.on('loading_screen', (percent, message) => {
       console.log(`[LOADING] ${displayName}: ${percent}%`);
     });
 
-    // ─── State Change (FALLBACK для ready) ──────────
     client.on('change_state', (state) => {
       console.log(`[STATE] ${displayName}: ${state}`);
       
@@ -465,9 +459,7 @@ function createSession(sessionId, displayName, proxy) {
       }
     });
 
-    // ─── Disconnected ───────────────────────────────
     client.on('disconnected', (reason) => {
-      // ═══ ДОБАВЛЕНО: guard ═══
       if (sessionData.status === 'disconnected') return;
       console.log(`[DC] ${displayName}:`, reason);
       sessionData.status = 'disconnected';
@@ -475,7 +467,6 @@ function createSession(sessionId, displayName, proxy) {
       broadcastSessions();
     });
 
-    // ─── Message (для проверки что клиент работает) ─
     client.on('message', (msg) => {
       if (sessionData.status !== 'ready') {
         console.log(`[MSG-READY] ${displayName} - got message, marking ready`);
@@ -491,14 +482,12 @@ function createSession(sessionId, displayName, proxy) {
       }
     });
 
-    // ─── Initialize ─────────────────────────────────
     console.log(`[INIT] ${displayName}...`);
     client.initialize().catch((err) => {
       console.error(`[INIT-ERR] ${displayName}:`, err.message);
       sessionData.status = 'auth_failure';
       sessionData.qr = null;
       broadcastSessions();
-      // ═══ ДОБАВЛЕНО: чистим кэш при ошибке ═══
       cleanupCacheFiles(sessionId);
     });
 
@@ -526,8 +515,6 @@ function getNextReadyAccount(sessionIds, accountMsgCounts, msgsPerAccount, start
 // ═══════════════════════════════════════════════════════
 //  API
 // ═══════════════════════════════════════════════════════
-
-// ─── АУТЕНТИФИКАЦИЯ ─────────────────────────────────────
 
 app.post('/api/auth/login', (req, res) => {
   const { password } = req.body;
@@ -574,7 +561,7 @@ app.post('/api/sessions', (req, res) => {
   res.json({ message: 'Создание...', id: sessionId });
 });
 
-// ═══ ДОБАВЛЕНО: эндпоинт переподключения ═══
+// ═══ Переподключение с закрытием proxy-chain ═══
 app.post('/api/sessions/:id/reconnect', async (req, res) => {
   const session = sessions.get(req.params.id);
   if (!session) return res.status(404).json({ error: 'Не найдено' });
@@ -583,7 +570,6 @@ app.post('/api/sessions/:id/reconnect', async (req, res) => {
 
   console.log(`[RECONNECT] ${displayName}...`);
 
-  // Уничтожаем старый клиент
   try {
     if (session.client) {
       await session.client.destroy().catch(() => {});
@@ -592,24 +578,28 @@ app.post('/api/sessions/:id/reconnect', async (req, res) => {
     console.log(`[RECONNECT] Destroy warning: ${e.message}`);
   }
 
-  // Удаляем из Map
+  // ═══ Закрываем proxy-chain ═══
+  if (session.anonymizedProxy && proxyChain) {
+    try {
+      await proxyChain.closeAnonymizedProxy(session.anonymizedProxy, true);
+      console.log(`[PROXY] Closed anonymized proxy for ${displayName}`);
+    } catch (e) {}
+  }
+
   sessions.delete(sessionId);
   broadcastSessions();
 
-  // Чистим lock-файлы и кэш
   cleanupStaleLocks(sessionId);
   cleanupCacheFiles(sessionId);
 
-  // Ждём чтобы процессы Chromium завершились
   await sleep(2000);
 
-  // Пересоздаём сессию
   createSession(sessionId, displayName, proxy);
 
   res.json({ message: 'Переподключение...' });
 });
 
-// ═══ ИЗМЕНЕНО: при удалении чистим файлы на диске ═══
+// ═══ Удаление с закрытием proxy-chain и очисткой диска ═══
 app.delete('/api/sessions/:id', async (req, res) => {
   const session = sessions.get(req.params.id);
   if (!session) return res.status(404).json({ error: 'Не найдено' });
@@ -620,11 +610,18 @@ app.delete('/api/sessions/:id', async (req, res) => {
     if (session.client) await session.client.destroy().catch(() => {});
   } catch (e) {}
 
+  // ═══ Закрываем proxy-chain ═══
+  if (session.anonymizedProxy && proxyChain) {
+    try {
+      await proxyChain.closeAnonymizedProxy(session.anonymizedProxy, true);
+      console.log(`[PROXY] Closed anonymized proxy for ${session.displayName}`);
+    } catch (e) {}
+  }
+
   sessions.delete(sessionId);
   broadcastSessions();
   saveSessions();
 
-  // ═══ ДОБАВЛЕНО: удаляем директорию профиля ═══
   setTimeout(() => {
     removeSessionDir(sessionId);
   }, 1000);
@@ -651,7 +648,6 @@ app.post('/api/sender/start', (req, res) => {
     msgsPerAccount, totalMessages, typingDelayMin, typingDelayMax,
     pauseAfterMsgs, pauseDurationMin, pauseDurationMax } = req.body;
 
-  // ═══ FIX: более понятные ошибки ═══
   if (!numbersFilePath) {
     return res.status(400).json({ error: 'Файл не указан. Загрузите файл с номерами.' });
   }
@@ -714,7 +710,7 @@ app.post('/api/sender/start', (req, res) => {
           await session.client.sendMessage(chatId, message);
           totalSent++;
           accountMsgCounts[session.id] = (accountMsgCounts[session.id] || 0) + 1;
-          currentIdx = (currentIdx + 1) % sessionIds.length;  // ← FIX: чередование аккаунтов
+          currentIdx = (currentIdx + 1) % sessionIds.length;
 
           io.emit('sender:progress', { sent: totalSent, remaining: numbers.length - i - 1, account: session.displayName });
           io.emit('sender:log', `[OK] ${session.displayName} -> +${num}`);
@@ -875,7 +871,7 @@ app.post('/api/warmer/start', (req, res) => {
         await session.client.sendMessage(`${num}@c.us`, generateRandomMessage());
         totalSent++;
         accountMsgCounts[session.id] = (accountMsgCounts[session.id] || 0) + 1;
-        currentIdx = (currentIdx + 1) % sessionIds.length;  // ← FIX: чередование
+        currentIdx = (currentIdx + 1) % sessionIds.length;
 
         io.emit('warmer:progress', { sent: totalSent, remaining: numbers.length - i - 1 });
         io.emit('warmer:log', `[OK] ${session.displayName} -> +${num}`);
@@ -922,18 +918,33 @@ app.get('/api/download/:filename', (req, res) => {
   res.download(filePath, filename);
 });
 
-// ─── ТЕСТ ПРОКСИ (диагностика) ──────────────────────────
+// ─── ТЕСТ ПРОКСИ ────────────────────────────────────────
+
 app.post('/api/test-proxy', async (req, res) => {
   const { proxy } = req.body;
   if (!proxy) return res.status(400).json({ error: 'Укажите прокси' });
 
-  console.log(`[PROXY-TEST] Testing: ${proxy}`);
+  console.log(`[PROXY-TEST] Testing: ${proxy.replace(/\/\/.*@/, '//***@')}`);
 
   const startTime = Date.now();
 
   try {
-    const httpModule = proxy.startsWith('https') ? require('https') : require('http');
-    const url = new URL(proxy);
+    // Если прокси с авторизацией — сначала анонимизируем
+    let testTarget = proxy;
+    let anonymized = null;
+
+    if (proxy.includes('@') && proxyChain) {
+      try {
+        anonymized = await proxyChain.anonymizeProxy(proxy);
+        testTarget = anonymized;
+        console.log(`[PROXY-TEST] Anonymized for test: ${anonymized}`);
+      } catch (e) {
+        return res.json({ success: false, error: `Proxy auth failed: ${e.message}` });
+      }
+    }
+
+    const url = new URL(testTarget);
+    const httpModule = require('http');
 
     const options = {
       host: url.hostname,
@@ -949,12 +960,14 @@ app.post('/api/test-proxy', async (req, res) => {
       const elapsed = Date.now() - startTime;
       console.log(`[PROXY-TEST] OK: ${response.statusCode} in ${elapsed}ms`);
       testReq.destroy();
+      if (anonymized && proxyChain) proxyChain.closeAnonymizedProxy(anonymized, true).catch(() => {});
       res.json({ success: true, status: response.statusCode, timeMs: elapsed });
     });
 
     testReq.on('error', (err) => {
       const elapsed = Date.now() - startTime;
       console.log(`[PROXY-TEST] FAIL: ${err.message} in ${elapsed}ms`);
+      if (anonymized && proxyChain) proxyChain.closeAnonymizedProxy(anonymized, true).catch(() => {});
       res.json({ success: false, error: err.message, timeMs: elapsed });
     });
 
@@ -962,6 +975,7 @@ app.post('/api/test-proxy', async (req, res) => {
       const elapsed = Date.now() - startTime;
       console.log(`[PROXY-TEST] TIMEOUT in ${elapsed}ms`);
       testReq.destroy();
+      if (anonymized && proxyChain) proxyChain.closeAnonymizedProxy(anonymized, true).catch(() => {});
       res.json({ success: false, error: 'Timeout (15s)', timeMs: elapsed });
     });
 
@@ -973,16 +987,16 @@ app.post('/api/test-proxy', async (req, res) => {
 });
 
 // ─── ПОИСК РАБОЧИХ ПРОКСИ ──────────────────────────────
+
 app.post('/api/find-proxy', async (req, res) => {
   console.log('[PROXY-FIND] Fetching proxy lists...');
 
   const https = require('https');
-  const http = require('http');
+  const httpMod = require('http');
 
-  // Скачиваем список прокси из нескольких источников
   function fetchList(url) {
     return new Promise((resolve) => {
-      const mod = url.startsWith('https') ? https : http;
+      const mod = url.startsWith('https') ? https : httpMod;
       mod.get(url, { timeout: 10000 }, (resp) => {
         let data = '';
         resp.on('data', c => data += c);
@@ -994,7 +1008,7 @@ app.post('/api/find-proxy', async (req, res) => {
   function testProxy(proxyHost, proxyPort, timeoutMs = 10000) {
     return new Promise((resolve) => {
       const start = Date.now();
-      const req = http.request({
+      const req = httpMod.request({
         host: proxyHost,
         port: proxyPort,
         method: 'CONNECT',
@@ -1008,22 +1022,13 @@ app.post('/api/find-proxy', async (req, res) => {
         resolve({ host: proxyHost, port: proxyPort, ok: true, ms: elapsed, status: response.statusCode });
       });
 
-      req.on('error', () => {
-        req.destroy();
-        resolve({ host: proxyHost, port: proxyPort, ok: false });
-      });
-
-      req.on('timeout', () => {
-        req.destroy();
-        resolve({ host: proxyHost, port: proxyPort, ok: false });
-      });
-
+      req.on('error', () => { req.destroy(); resolve({ host: proxyHost, port: proxyPort, ok: false }); });
+      req.on('timeout', () => { req.destroy(); resolve({ host: proxyHost, port: proxyPort, ok: false }); });
       req.end();
     });
   }
 
   try {
-    // Несколько источников бесплатных прокси
     const [list1, list2, list3] = await Promise.all([
       fetchList('https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt'),
       fetchList('https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/http.txt'),
@@ -1032,14 +1037,11 @@ app.post('/api/find-proxy', async (req, res) => {
 
     const allText = list1 + '\n' + list2 + '\n' + list3;
     const allProxies = [...new Set(
-      allText.split('\n')
-        .map(l => l.trim())
-        .filter(l => /^\d+\.\d+\.\d+\.\d+:\d+$/.test(l))
+      allText.split('\n').map(l => l.trim()).filter(l => /^\d+\.\d+\.\d+\.\d+:\d+$/.test(l))
     )];
 
     console.log(`[PROXY-FIND] Got ${allProxies.length} unique proxies, testing...`);
 
-    // Тестим партиями по 50
     const working = [];
     const batchSize = 50;
 
@@ -1058,8 +1060,6 @@ app.post('/api/find-proxy', async (req, res) => {
     }
 
     console.log(`[PROXY-FIND] Done. Found ${working.length} working proxies`);
-    
-    // Сортируем по скорости
     working.sort((a, b) => a.ms - b.ms);
 
     res.json({
@@ -1070,7 +1070,6 @@ app.post('/api/find-proxy', async (req, res) => {
         responseMs: p.ms
       }))
     });
-
   } catch (err) {
     console.error('[PROXY-FIND] Error:', err.message);
     res.json({ tested: 0, found: 0, proxies: [], error: err.message });
@@ -1098,7 +1097,6 @@ const PORT = process.env.PORT || 3001;
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`\n=== Server: http://localhost:${PORT} ===\n`);
-  // ═══ ДОБАВЛЕНО: чистим всё при старте ═══
   cleanupAllOnStartup();
   setTimeout(loadSavedSessions, 3000);
 });
