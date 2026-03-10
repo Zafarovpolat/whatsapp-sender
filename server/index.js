@@ -922,6 +922,28 @@ app.get('/api/download/:filename', (req, res) => {
   res.download(filePath, filename);
 });
 
+// ─── ТЕСТ ПРОКСИ (диагностика) ──────────────────────────
+app.post('/api/test-proxy', async (req, res) => {
+  const { proxy } = req.body;
+  if (!proxy) return res.status(400).json({ error: 'Укажите прокси' });
+
+  console.log(`[PROXY-TEST] Testing: ${proxy}`);
+
+  const { exec } = require('child_process');
+  
+  exec(`curl -x ${proxy} https://web.whatsapp.com/ -I --connect-timeout 15 -s -o /dev/null -w "%{http_code} %{time_total}s"`, 
+    { timeout: 20000 },
+    (error, stdout, stderr) => {
+      if (error) {
+        console.log(`[PROXY-TEST] FAIL: ${error.message}`);
+        return res.json({ success: false, error: error.message });
+      }
+      console.log(`[PROXY-TEST] Result: ${stdout.trim()}`);
+      res.json({ success: true, result: stdout.trim() });
+    }
+  );
+});
+
 // ═══════════════════════════════════════════════════════
 //  СТАРТ
 // ═══════════════════════════════════════════════════════
