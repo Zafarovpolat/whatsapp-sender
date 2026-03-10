@@ -22,40 +22,96 @@ export default function Sender() {
   const logRef = useRef();
 
   useEffect(() => {
-    axios.get('/api/sessions').then(r => setSessions(r.data));
-    socket.on('sessions:update', setSessions);
-    socket.on('sender:log', m => setLogs(p => [...p, m]));
-    socket.on('sender:progress', setProgress);
-    socket.on('sender:complete', () => setRunning(false));
-    socket.on('sender:error', m => { setLogs(p => [...p, `[ERR] ${m}`]); setRunning(false); });
-    return () => { ['sessions:update','sender:log','sender:progress','sender:complete','sender:error'].forEach(e => socket.off(e)); };
+    axios.get('/api/sessions').then(r => setSessions(r.data)).catch(() => {});
+
+    const onSessions = (data) => setSessions(data);
+    const onLog = (m) => setLogs(p => [...p, m]);
+    const onProgress = (data) => setProgress(data);
+    const onComplete = () => setRunning(false);
+    const onError = (m) => { setLogs(p => [...p, `[ERR] ${m}`]); setRunning(false); };
+
+    socket.on('sessions:update', onSessions);
+    socket.on('sender:log', onLog);
+    socket.on('sender:progress', onProgress);
+    socket.on('sender:complete', onComplete);
+    socket.on('sender:error', onError);
+
+    return () => {
+      socket.off('sessions:update', onSessions);
+      socket.off('sender:log', onLog);
+      socket.off('sender:progress', onProgress);
+      socket.off('sender:complete', onComplete);
+      socket.off('sender:error', onError);
+    };
   }, []);
 
-  useEffect(() => { logRef.current && (logRef.current.scrollTop = logRef.current.scrollHeight); }, [logs]);
+  useEffect(() => {
+    if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
+  }, [logs]);
 
   const upload = async (e) => {
-    const f = e.target.files[0]; if (!f) return;
-    const fd = new FormData(); fd.append('file', f);
-    const { data } = await axios.post('/api/upload', fd);
-    setFilePath(data.path); setNumCount(data.count); setFileName(f.name);
+    const f = e.target.files[0];
+    if (!f) return;
+    const fd = new FormData();
+    fd.append('file', f);
+    try {
+      const { data } = await axios.post('/api/upload', fd);
+      setFilePath(data.path);
+      setNumCount(data.count);
+      setFileName(f.name);
+    } catch (err) {
+      alert('Ошибка загрузки файла: ' + (err.response?.data?.error || err.message));
+    }
   };
 
   const toggle = id => setSelected(p => p.includes(id) ? p.filter(x => x !== id) : [...p, id]);
 
   const start = async () => {
     if (!selected.length) return alert('Выберите аккаунты');
-    if (!filePath) return alert('Загрузите номера');
+    if (!filePath) return alert('Загрузите файл с номерами');
     if (!message.trim()) return alert('Введите сообщение');
-    setLogs([]); setProgress({ sent: 0, remaining: numCount }); setRunning(true);
-    await axios.post('/api/sender/start', {
-      sessionIds: selected, numbersFilePath: filePath, messageTemplate: message,
-      msgsPerAccount: +msgsPerAcc, totalMessages: +totalMsgs,
-      typingDelayMin: +tDelayMin, typingDelayMax: +tDelayMax,
-      pauseAfterMsgs: +pauseAfter, pauseDurationMin: +pauseMin, pauseDurationMax: +pauseMax
-    });
+
+    setLogs([]);
+    setProgress({ sent: 0, remaining: numCount });
+    setRunning(true);
+
+    try {
+      await axios.post('/api/sender/start', {
+        sessionIds: selected,
+        numbersFilePath: filePath,
+        messageTemplate: message,
+        msgsPerAccount: +msgsPerAcc,
+        totalMessages: +totalMsgs,
+        typingDelayMin: +tDelayMin,
+        typingDelayMax: +tDelayMax,
+        pauseAfterMsgs: +pauseAfter,
+        pauseDurationMin: +pauseMin,
+        pauseDurationMax: +pauseMax
+      });
+    } catch (err) {
+      const errorMsg = err.response?.data?.error || err.message;
+      setLogs(p => [...p, `[ERR] ${errorMsg}`]);
+      setRunning(false);
+
+      // ═══ FIX: Если файл не найден — сбрасываем чтобы пользователь загрузил заново ═══
+      if (err.response?.status === 400 && errorMsg.includes('Файл')) {
+        setFilePath('');
+        setFileName('');
+        setNumCount(0);
+        alert('Файл с номерами не найден на сервере. Загрузите заново.');
+      } else {
+        alert('Ошибка: ' + errorMsg);
+      }
+    }
   };
 
-  const stop = async () => { await axios.post('/api/sender/stop'); setRunning(false); };
+  const stop = async () => {
+    try {
+      await axios.post('/api/sender/stop');
+    } catch (e) {}
+    setRunning(false);
+  };
+
   const ready = sessions.filter(s => s.status === 'ready');
 
   return (

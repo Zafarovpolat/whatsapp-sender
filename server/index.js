@@ -645,8 +645,21 @@ app.post('/api/sender/start', (req, res) => {
     msgsPerAccount, totalMessages, typingDelayMin, typingDelayMax,
     pauseAfterMsgs, pauseDurationMin, pauseDurationMax } = req.body;
 
+  // ═══ FIX: более понятные ошибки ═══
+  if (!numbersFilePath) {
+    return res.status(400).json({ error: 'Файл не указан. Загрузите файл с номерами.' });
+  }
+
   if (!fs.existsSync(numbersFilePath)) {
-    return res.status(400).json({ error: 'Файл не найден' });
+    return res.status(400).json({ error: 'Файл не найден на сервере. Загрузите файл заново.' });
+  }
+
+  if (!sessionIds || !sessionIds.length) {
+    return res.status(400).json({ error: 'Не выбраны аккаунты' });
+  }
+
+  if (!messageTemplate || !messageTemplate.trim()) {
+    return res.status(400).json({ error: 'Не указан шаблон сообщения' });
   }
 
   const numbers = fs.readFileSync(numbersFilePath, 'utf-8')
@@ -668,7 +681,7 @@ app.post('/api/sender/start', (req, res) => {
         if (totalMessages > 0 && totalSent >= totalMessages) break;
 
         const found = getNextReadyAccount(sessionIds, accountMsgCounts, msgsPerAccount, currentIdx);
-        if (!found) { io.emit('sender:log', '[!] Нет аккаунтов'); break; }
+        if (!found) { io.emit('sender:log', '[!] Нет доступных аккаунтов'); break; }
 
         const { session, index } = found;
         currentIdx = index;
@@ -695,6 +708,7 @@ app.post('/api/sender/start', (req, res) => {
           await session.client.sendMessage(chatId, message);
           totalSent++;
           accountMsgCounts[session.id] = (accountMsgCounts[session.id] || 0) + 1;
+          currentIdx = (currentIdx + 1) % sessionIds.length;  // ← FIX: чередование аккаунтов
 
           io.emit('sender:progress', { sent: totalSent, remaining: numbers.length - i - 1, account: session.displayName });
           io.emit('sender:log', `[OK] ${session.displayName} -> +${num}`);
@@ -715,7 +729,7 @@ app.post('/api/sender/start', (req, res) => {
     } finally {
       senderState = { running: false, controller: null };
       io.emit('sender:complete', { totalSent });
-      io.emit('sender:log', `[DONE] ${totalSent}`);
+      io.emit('sender:log', `[DONE] Отправлено: ${totalSent}`);
     }
   })();
 
@@ -805,7 +819,13 @@ app.post('/api/warmer/start', (req, res) => {
   const { sessionIds, numbersFilePath, msgsPerAccount, totalMessages,
     typingDelayMin, typingDelayMax, pauseAfterMsgs, pauseDurationMin, pauseDurationMax } = req.body;
 
-  if (!fs.existsSync(numbersFilePath)) return res.status(400).json({ error: 'Нет файла' });
+  if (!numbersFilePath) {
+    return res.status(400).json({ error: 'Файл не указан. Загрузите файл с номерами.' });
+  }
+
+  if (!fs.existsSync(numbersFilePath)) {
+    return res.status(400).json({ error: 'Файл не найден на сервере. Загрузите файл заново.' });
+  }
 
   const numbers = fs.readFileSync(numbersFilePath, 'utf-8')
     .split(/\r?\n/).map(n => n.trim()).filter(Boolean);
@@ -825,7 +845,7 @@ app.post('/api/warmer/start', (req, res) => {
       if (totalMessages > 0 && totalSent >= totalMessages) break;
 
       const found = getNextReadyAccount(sessionIds, accountMsgCounts, msgsPerAccount, currentIdx);
-      if (!found) { io.emit('warmer:log', '[!] Нет аккаунтов'); break; }
+      if (!found) { io.emit('warmer:log', '[!] Нет доступных аккаунтов'); break; }
 
       const { session, index } = found;
       currentIdx = index;
@@ -849,6 +869,7 @@ app.post('/api/warmer/start', (req, res) => {
         await session.client.sendMessage(`${num}@c.us`, generateRandomMessage());
         totalSent++;
         accountMsgCounts[session.id] = (accountMsgCounts[session.id] || 0) + 1;
+        currentIdx = (currentIdx + 1) % sessionIds.length;  // ← FIX: чередование
 
         io.emit('warmer:progress', { sent: totalSent, remaining: numbers.length - i - 1 });
         io.emit('warmer:log', `[OK] ${session.displayName} -> +${num}`);
@@ -866,7 +887,7 @@ app.post('/api/warmer/start', (req, res) => {
 
     warmerState = { running: false, controller: null };
     io.emit('warmer:complete', { totalSent });
-    io.emit('warmer:log', `[DONE] ${totalSent}`);
+    io.emit('warmer:log', `[DONE] Отправлено: ${totalSent}`);
   })();
 
   res.json({ message: 'Запущено' });
