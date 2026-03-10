@@ -972,6 +972,111 @@ app.post('/api/test-proxy', async (req, res) => {
   }
 });
 
+// ─── ПОИСК РАБОЧИХ ПРОКСИ ──────────────────────────────
+app.post('/api/find-proxy', async (req, res) => {
+  console.log('[PROXY-FIND] Fetching proxy lists...');
+
+  const https = require('https');
+  const http = require('http');
+
+  // Скачиваем список прокси из нескольких источников
+  function fetchList(url) {
+    return new Promise((resolve) => {
+      const mod = url.startsWith('https') ? https : http;
+      mod.get(url, { timeout: 10000 }, (resp) => {
+        let data = '';
+        resp.on('data', c => data += c);
+        resp.on('end', () => resolve(data));
+      }).on('error', () => resolve(''));
+    });
+  }
+
+  function testProxy(proxyHost, proxyPort, timeoutMs = 10000) {
+    return new Promise((resolve) => {
+      const start = Date.now();
+      const req = http.request({
+        host: proxyHost,
+        port: proxyPort,
+        method: 'CONNECT',
+        path: 'web.whatsapp.com:443',
+        timeout: timeoutMs
+      });
+
+      req.on('connect', (response) => {
+        const elapsed = Date.now() - start;
+        req.destroy();
+        resolve({ host: proxyHost, port: proxyPort, ok: true, ms: elapsed, status: response.statusCode });
+      });
+
+      req.on('error', () => {
+        req.destroy();
+        resolve({ host: proxyHost, port: proxyPort, ok: false });
+      });
+
+      req.on('timeout', () => {
+        req.destroy();
+        resolve({ host: proxyHost, port: proxyPort, ok: false });
+      });
+
+      req.end();
+    });
+  }
+
+  try {
+    // Несколько источников бесплатных прокси
+    const [list1, list2, list3] = await Promise.all([
+      fetchList('https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt'),
+      fetchList('https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/http.txt'),
+      fetchList('https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt')
+    ]);
+
+    const allText = list1 + '\n' + list2 + '\n' + list3;
+    const allProxies = [...new Set(
+      allText.split('\n')
+        .map(l => l.trim())
+        .filter(l => /^\d+\.\d+\.\d+\.\d+:\d+$/.test(l))
+    )];
+
+    console.log(`[PROXY-FIND] Got ${allProxies.length} unique proxies, testing...`);
+
+    // Тестим партиями по 50
+    const working = [];
+    const batchSize = 50;
+
+    for (let i = 0; i < Math.min(allProxies.length, 500) && working.length < 5; i += batchSize) {
+      const batch = allProxies.slice(i, i + batchSize).map(p => {
+        const [host, port] = p.split(':');
+        return testProxy(host, parseInt(port), 8000);
+      });
+
+      const results = await Promise.all(batch);
+      results.filter(r => r.ok).forEach(r => working.push(r));
+
+      console.log(`[PROXY-FIND] Tested ${Math.min(i + batchSize, allProxies.length)}/${Math.min(allProxies.length, 500)}, found ${working.length} working`);
+
+      if (working.length >= 5) break;
+    }
+
+    console.log(`[PROXY-FIND] Done. Found ${working.length} working proxies`);
+    
+    // Сортируем по скорости
+    working.sort((a, b) => a.ms - b.ms);
+
+    res.json({
+      tested: Math.min(allProxies.length, 500),
+      found: working.length,
+      proxies: working.slice(0, 10).map(p => ({
+        proxy: `http://${p.host}:${p.port}`,
+        responseMs: p.ms
+      }))
+    });
+
+  } catch (err) {
+    console.error('[PROXY-FIND] Error:', err.message);
+    res.json({ tested: 0, found: 0, proxies: [], error: err.message });
+  }
+});
+
 // ═══════════════════════════════════════════════════════
 //  СТАРТ
 // ═══════════════════════════════════════════════════════
