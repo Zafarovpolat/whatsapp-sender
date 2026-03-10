@@ -929,19 +929,47 @@ app.post('/api/test-proxy', async (req, res) => {
 
   console.log(`[PROXY-TEST] Testing: ${proxy}`);
 
-  const { exec } = require('child_process');
-  
-  exec(`curl -x ${proxy} https://web.whatsapp.com/ -I --connect-timeout 15 -s -o /dev/null -w "%{http_code} %{time_total}s"`, 
-    { timeout: 20000 },
-    (error, stdout, stderr) => {
-      if (error) {
-        console.log(`[PROXY-TEST] FAIL: ${error.message}`);
-        return res.json({ success: false, error: error.message });
-      }
-      console.log(`[PROXY-TEST] Result: ${stdout.trim()}`);
-      res.json({ success: true, result: stdout.trim() });
-    }
-  );
+  const startTime = Date.now();
+
+  try {
+    const httpModule = proxy.startsWith('https') ? require('https') : require('http');
+    const url = new URL(proxy);
+
+    const options = {
+      host: url.hostname,
+      port: url.port,
+      method: 'CONNECT',
+      path: 'web.whatsapp.com:443',
+      timeout: 15000
+    };
+
+    const testReq = httpModule.request(options);
+
+    testReq.on('connect', (response) => {
+      const elapsed = Date.now() - startTime;
+      console.log(`[PROXY-TEST] OK: ${response.statusCode} in ${elapsed}ms`);
+      testReq.destroy();
+      res.json({ success: true, status: response.statusCode, timeMs: elapsed });
+    });
+
+    testReq.on('error', (err) => {
+      const elapsed = Date.now() - startTime;
+      console.log(`[PROXY-TEST] FAIL: ${err.message} in ${elapsed}ms`);
+      res.json({ success: false, error: err.message, timeMs: elapsed });
+    });
+
+    testReq.on('timeout', () => {
+      const elapsed = Date.now() - startTime;
+      console.log(`[PROXY-TEST] TIMEOUT in ${elapsed}ms`);
+      testReq.destroy();
+      res.json({ success: false, error: 'Timeout (15s)', timeMs: elapsed });
+    });
+
+    testReq.end();
+  } catch (err) {
+    console.log(`[PROXY-TEST] ERROR: ${err.message}`);
+    res.json({ success: false, error: err.message });
+  }
 });
 
 // ═══════════════════════════════════════════════════════
