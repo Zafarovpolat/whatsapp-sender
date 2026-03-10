@@ -127,7 +127,9 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 // ═══════════════════════════════════════════════════════
 
 /**
- * Удаляет stale lock-файлы Chromium (остаются после краша/рестарта)
+ * Удаляет stale lock-файлы Chromium (остаются после краша/рестарта).
+ * ВАЖНО: SingletonLock — это SYMLINK. fs.existsSync не видит битые symlinks!
+ * Поэтому используем fs.lstatSync который проверяет сам symlink, а не его цель.
  */
 function cleanupStaleLocks(sessionId) {
   const profileDir = path.join(AUTH_DATA_DIR, `session-${sessionId}`);
@@ -139,20 +141,24 @@ function cleanupStaleLocks(sessionId) {
     lockFiles.forEach(f => {
       const p = path.join(dir, f);
       try {
-        if (fs.existsSync(p)) {
-          fs.unlinkSync(p);
-          console.log(`[CLEANUP] Removed lock: ${p}`);
-        }
-      } catch (e) {}
+        // lstatSync НЕ следует по symlink — видит битые ссылки
+        fs.lstatSync(p);
+        fs.unlinkSync(p);
+        console.log(`[CLEANUP] Removed lock: ${p}`);
+      } catch (e) {
+        // Файл не существует — ок
+      }
     });
   }
 
   removeLocks(profileDir);
 
-  // Также вложенные директории
+  // Также вложенные директории (Default, Profile 1, ...)
   try {
     fs.readdirSync(profileDir, { withFileTypes: true })
-      .filter(d => d.isDirectory())
+      .filter(d => {
+        try { return d.isDirectory(); } catch (e) { return false; }
+      })
       .forEach(d => removeLocks(path.join(profileDir, d.name)));
   } catch (e) {}
 }
