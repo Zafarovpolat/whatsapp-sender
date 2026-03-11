@@ -100,8 +100,171 @@ io.use((socket, next) => {
 io.on('connection', (sock) => {
   console.log(`[WS] Client connected: ${sock.id}`);
   sock.emit('sessions:update', getSessionsList());
+
+  // ═══════════════════════════════════════════════════
+  //  SCREENCAST: Запуск трансляции
+  // ═══════════════════════════════════════════════════
+
+  sock.on('screencast:start', async ({ sessionId, quality, maxWidth, maxHeight }) => {
+    try {
+      const session = sessions.get(sessionId);
+      if (!session || session.status !== 'ready' || !session.client) {
+        return sock.emit('screencast:error', { sessionId, error: 'Аккаунт не готов' });
+      }
+
+      const page = session.client.pupPage;
+      if (!page) {
+        return sock.emit('screencast:error', { sessionId, error: 'Браузер не готов. Подождите полной загрузки.' });
+      }
+
+      // Закрыть предыдущий screencast этого зрителя
+      const key = `${sessionId}_${sock.id}`;
+      const existing = screencastState.get(key);
+      if (existing) {
+        try {
+          await existing.cdpSession.send('Page.stopScreencast');
+          await existing.cdpSession.detach();
+        } catch (e) {}
+        screencastState.delete(key);
+      }
+
+      // Установить viewport для лучшего качества
+      const vw = maxWidth || 1280;
+      const vh = maxHeight || 800;
+      try {
+        await page.setViewport({ width: vw, height: vh });
+      } catch (e) {
+        console.log(`[SCREENCAST] Viewport warning: ${e.message}`);
+      }
+
+      // Создать CDP-сессию
+      const cdpSession = await page.target().createCDPSession();
+
+      cdpSession.on('Page.screencastFrame', async ({ data, metadata, sessionId: frameId }) => {
+        try {
+          // Подтвердить получение кадра (обязательно!)
+          await cdpSession.send('Page.screencastFrameAck', { sessionId: frameId });
+          // Отправить кадр зрителю
+          sock.emit('screencast:frame', { sessionId, data, metadata });
+        } catch (e) {}
+      });
+
+      await cdpSession.send('Page.startScreencast', {
+        format: 'jpeg',
+        quality: quality || 40,
+        maxWidth: vw,
+        maxHeight: vh,
+        everyNthFrame: 1
+      });
+
+      screencastState.set(key, { cdpSession, sessionId });
+      console.log(`[SCREENCAST] Started: ${session.displayName} → ${sock.id}`);
+      sock.emit('screencast:started', { sessionId });
+
+    } catch (err) {
+      console.error(`[SCREENCAST] Start error:`, err.message);
+      sock.emit('screencast:error', { sessionId, error: err.message });
+    }
+  });
+
+  // ═══════════════════════════════════════════════════
+  //  SCREENCAST: Остановка
+  // ═══════════════════════════════════════════════════
+
+  sock.on('screencast:stop', async ({ sessionId }) => {
+    const key = `${sessionId}_${sock.id}`;
+    const state = screencastState.get(key);
+    if (state) {
+      try {
+        await state.cdpSession.send('Page.stopScreencast');
+        await state.cdpSession.detach();
+      } catch (e) {}
+      screencastState.delete(key);
+      console.log(`[SCREENCAST] Stopped: ${sessionId} → ${sock.id}`);
+    }
+  });
+
+  // ═══════════════════════════════════════════════════
+  //  SCREENCAST: Ввод — клик мышью
+  // ═══════════════════════════════════════════════════
+
+  sock.on('screencast:click', async ({ sessionId, x, y, button }) => {
+    try {
+      const session = sessions.get(sessionId);
+      const page = session?.client?.pupPage;
+      if (!page) return;
+      await page.mouse.click(Math.round(x), Math.round(y), {
+        button: button || 'left'
+      });
+    } catch (e) {
+      console.log(`[SCREENCAST] Click error: ${e.message}`);
+    }
+  });
+
+  // ═══════════════════════════════════════════════════
+  //  SCREENCAST: Ввод — скролл
+  // ═══════════════════════════════════════════════════
+
+  sock.on('screencast:scroll', async ({ sessionId, x, y, deltaX, deltaY }) => {
+    try {
+      const session = sessions.get(sessionId);
+      const page = session?.client?.pupPage;
+      if (!page) return;
+      await page.mouse.move(Math.round(x), Math.round(y));
+      await page.mouse.wheel({ deltaX: deltaX || 0, deltaY: deltaY || 0 });
+    } catch (e) {
+      console.log(`[SCREENCAST] Scroll error: ${e.message}`);
+    }
+  });
+
+  // ═══════════════════════════════════════════════════
+  //  SCREENCAST: Ввод — печать текста
+  // ═══════════════════════════════════════════════════
+
+  sock.on('screencast:type', async ({ sessionId, text }) => {
+    try {
+      const session = sessions.get(sessionId);
+      const page = session?.client?.pupPage;
+      if (!page) return;
+      await page.keyboard.type(text, { delay: 30 });
+    } catch (e) {
+      console.log(`[SCREENCAST] Type error: ${e.message}`);
+    }
+  });
+
+  // ═══════════════════════════════════════════════════
+  //  SCREENCAST: Ввод — клавиши (Enter, Backspace...)
+  // ═══════════════════════════════════════════════════
+
+  sock.on('screencast:keypress', async ({ sessionId, key }) => {
+    try {
+      const session = sessions.get(sessionId);
+      const page = session?.client?.pupPage;
+      if (!page) return;
+      await page.keyboard.press(key);
+    } catch (e) {
+      console.log(`[SCREENCAST] Keypress error: ${e.message}`);
+    }
+  });
+
+  // ═══════════════════════════════════════════════════
+  //  Отключение: очистка всех screencast-сессий
+  // ═══════════════════════════════════════════════════
+
   sock.on('disconnect', (reason) => {
     console.log(`[WS] Client disconnected: ${sock.id} (${reason})`);
+
+    // Cleanup screencast
+    for (const [key, state] of screencastState) {
+      if (key.endsWith(`_${sock.id}`)) {
+        try {
+          state.cdpSession.send('Page.stopScreencast').catch(() => {});
+          state.cdpSession.detach().catch(() => {});
+        } catch (e) {}
+        screencastState.delete(key);
+        console.log(`[SCREENCAST] Cleaned up: ${key}`);
+      }
+    }
   });
 });
 
@@ -126,6 +289,13 @@ const sessions = new Map();
 let senderState  = { running: false, controller: null };
 let checkerState = { running: false, controller: null };
 let warmerState  = { running: false, controller: null };
+
+// ═══════════════════════════════════════════════════════
+//  CDP SCREENCAST (Live View)
+// ═══════════════════════════════════════════════════════
+
+const screencastState = new Map(); // key: `${sessionId}_${socketId}` → { cdpSession }
+
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 

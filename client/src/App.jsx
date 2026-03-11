@@ -7,6 +7,7 @@ import Sender   from './pages/Sender';
 import Checker  from './pages/Checker';
 import Warmer   from './pages/Warmer';
 import Login    from './pages/Login';
+import LiveView from './pages/LiveView';
 
 export const AuthContext = createContext(null);
 
@@ -157,6 +158,14 @@ export default function App() {
               <path d="M12 15v5s3.03-.55 4-2c1.08-1.62 0-5 0-5"/>
             </svg>
           </NavLink>
+
+          <NavLink to="/live" data-label="Live View">
+            <svg className="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="2" y="3" width="20" height="14" rx="2" ry="2"/>
+              <line x1="8" y1="21" x2="16" y2="21"/>
+              <line x1="12" y1="17" x2="12" y2="21"/>
+            </svg>
+        </NavLink>
         </nav>
 
         <main className="content">
@@ -165,6 +174,7 @@ export default function App() {
             <Route path="/sender"  element={<Sender />}   />
             <Route path="/checker" element={<Checker />}   />
             <Route path="/warmer"  element={<Warmer />}    />
+            <Route path="/live" element={<LiveView />} />
           </Routes>
         </main>
       </div>
