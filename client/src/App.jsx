@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, createContext } from 'react';
 import { Routes, Route, NavLink } from 'react-router-dom';
 import axios from 'axios';
-import { initSocket, disconnectSocket } from './socket';
+import { initSocket, disconnectSocket, getSocketId } from './socket';  // ← добавлен getSocketId
 import Accounts from './pages/Accounts';
 import Sender   from './pages/Sender';
 import Checker  from './pages/Checker';
@@ -11,27 +11,33 @@ import LiveView from './pages/LiveView';
 
 export const AuthContext = createContext(null);
 
-// ═══════════════════════════════════════════════════════
-//  КЛЮЧЕВОЙ FIX: ставим заголовок СИНХРОННО при загрузке
-//  модуля — ДО любого рендера и useEffect
-// ═══════════════════════════════════════════════════════
 const savedToken = localStorage.getItem('auth_token');
 if (savedToken) {
   axios.defaults.headers.common['x-auth-token'] = savedToken;
 }
 
+// ═══════════════════════════════════════════════════════
+//  НОВОЕ: каждый HTTP-запрос отправляет x-socket-id
+//  чтобы сервер знал какому пользователю принадлежит задача
+// ═══════════════════════════════════════════════════════
+axios.interceptors.request.use((config) => {
+  const sid = getSocketId();
+  if (sid) {
+    config.headers['x-socket-id'] = sid;
+  }
+  return config;
+});
+
 export default function App() {
   const [token, setToken]       = useState(savedToken || null);
-  const [needsAuth, setNeedsAuth] = useState(null); // null = loading
+  const [needsAuth, setNeedsAuth] = useState(null);
   const [ready, setReady]       = useState(false);
   const logoutRef               = useRef(null);
 
-  // ─── Глобальный перехватчик 401 → автоматический logout ───
   useEffect(() => {
     const id = axios.interceptors.response.use(
       res => res,
       err => {
-        // Если любой /api/* вернул 401 — токен протух
         if (err.response?.status === 401 &&
             err.config?.url !== '/api/auth/check' &&
             err.config?.url !== '/api/auth/login') {
@@ -43,7 +49,6 @@ export default function App() {
     return () => axios.interceptors.response.eject(id);
   }, []);
 
-  // ─── Проверяем авторизацию ОДИН раз при загрузке ───
   useEffect(() => {
     (async () => {
       try {
@@ -51,7 +56,6 @@ export default function App() {
         setNeedsAuth(data.needsAuth);
 
         if (!data.needsAuth) {
-          // Пароль не задан — пускаем всех
           const t = 'no-auth';
           localStorage.setItem('auth_token', t);
           axios.defaults.headers.common['x-auth-token'] = t;
@@ -60,19 +64,16 @@ export default function App() {
           setReady(true);
 
         } else if (data.authenticated && token && token !== 'no-auth') {
-          // Токен валиден — инициализируем сокет ДО setReady
           initSocket(token);
           setReady(true);
 
         } else {
-          // Токен отсутствует или невалиден — на логин
           localStorage.removeItem('auth_token');
           delete axios.defaults.headers.common['x-auth-token'];
           setToken(null);
           setReady(false);
         }
       } catch (err) {
-        // Сервер недоступен или другая ошибка
         setNeedsAuth(true);
         localStorage.removeItem('auth_token');
         delete axios.defaults.headers.common['x-auth-token'];
@@ -80,18 +81,16 @@ export default function App() {
         setReady(false);
       }
     })();
-  }, []); // ← БЕЗ зависимости [token] — убираем повторные вызовы
+  }, []);
 
-  // ─── Логин: всё ставим СИНХРОННО до setState ───
   const handleLogin = (newToken) => {
     localStorage.setItem('auth_token', newToken);
     axios.defaults.headers.common['x-auth-token'] = newToken;
-    initSocket(newToken);          // сокет готов ДО рендера Accounts
+    initSocket(newToken);
     setToken(newToken);
     setReady(true);
   };
 
-  // ─── Логаут ───
   const handleLogout = () => {
     localStorage.removeItem('auth_token');
     delete axios.defaults.headers.common['x-auth-token'];
@@ -101,10 +100,8 @@ export default function App() {
     setNeedsAuth(true);
   };
 
-  // ref для перехватчика (чтобы не пересоздавать interceptor)
   logoutRef.current = handleLogout;
 
-  // ─── Loading ───
   if (needsAuth === null) {
     return (
       <div className="login-overlay">
@@ -116,7 +113,6 @@ export default function App() {
     );
   }
 
-  // ─── Нужна авторизация ───
   if (needsAuth && !ready) {
     return <Login onLogin={handleLogin} />;
   }
@@ -165,7 +161,7 @@ export default function App() {
               <line x1="8" y1="21" x2="16" y2="21"/>
               <line x1="12" y1="17" x2="12" y2="21"/>
             </svg>
-        </NavLink>
+          </NavLink>
         </nav>
 
         <main className="content">
@@ -174,7 +170,7 @@ export default function App() {
             <Route path="/sender"  element={<Sender />}   />
             <Route path="/checker" element={<Checker />}   />
             <Route path="/warmer"  element={<Warmer />}    />
-            <Route path="/live" element={<LiveView />} />
+            <Route path="/live"    element={<LiveView />}  />
           </Routes>
         </main>
       </div>

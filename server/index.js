@@ -97,6 +97,10 @@ io.use((socket, next) => {
   next();
 });
 
+// ═══════════════════════════════════════════════════════
+//  SOCKET.IO + SCREENCAST
+// ═══════════════════════════════════════════════════════
+
 io.on('connection', (sock) => {
   console.log(`[WS] Client connected: ${sock.id}`);
   sock.emit('sessions:update', getSessionsList());
@@ -117,7 +121,6 @@ io.on('connection', (sock) => {
         return sock.emit('screencast:error', { sessionId, error: 'Браузер не готов. Подождите полной загрузки.' });
       }
 
-      // Закрыть предыдущий screencast этого зрителя
       const key = `${sessionId}_${sock.id}`;
       const existing = screencastState.get(key);
       if (existing) {
@@ -128,7 +131,6 @@ io.on('connection', (sock) => {
         screencastState.delete(key);
       }
 
-      // Установить viewport для лучшего качества
       const vw = maxWidth || 1280;
       const vh = maxHeight || 800;
       try {
@@ -137,14 +139,11 @@ io.on('connection', (sock) => {
         console.log(`[SCREENCAST] Viewport warning: ${e.message}`);
       }
 
-      // Создать CDP-сессию
       const cdpSession = await page.target().createCDPSession();
 
       cdpSession.on('Page.screencastFrame', async ({ data, metadata, sessionId: frameId }) => {
         try {
-          // Подтвердить получение кадра (обязательно!)
           await cdpSession.send('Page.screencastFrameAck', { sessionId: frameId });
-          // Отправить кадр зрителю
           sock.emit('screencast:frame', { sessionId, data, metadata });
         } catch (e) {}
       });
@@ -167,10 +166,6 @@ io.on('connection', (sock) => {
     }
   });
 
-  // ═══════════════════════════════════════════════════
-  //  SCREENCAST: Остановка
-  // ═══════════════════════════════════════════════════
-
   sock.on('screencast:stop', async ({ sessionId }) => {
     const key = `${sessionId}_${sock.id}`;
     const state = screencastState.get(key);
@@ -184,26 +179,16 @@ io.on('connection', (sock) => {
     }
   });
 
-  // ═══════════════════════════════════════════════════
-  //  SCREENCAST: Ввод — клик мышью
-  // ═══════════════════════════════════════════════════
-
   sock.on('screencast:click', async ({ sessionId, x, y, button }) => {
     try {
       const session = sessions.get(sessionId);
       const page = session?.client?.pupPage;
       if (!page) return;
-      await page.mouse.click(Math.round(x), Math.round(y), {
-        button: button || 'left'
-      });
+      await page.mouse.click(Math.round(x), Math.round(y), { button: button || 'left' });
     } catch (e) {
       console.log(`[SCREENCAST] Click error: ${e.message}`);
     }
   });
-
-  // ═══════════════════════════════════════════════════
-  //  SCREENCAST: Ввод — скролл
-  // ═══════════════════════════════════════════════════
 
   sock.on('screencast:scroll', async ({ sessionId, x, y, deltaX, deltaY }) => {
     try {
@@ -217,10 +202,6 @@ io.on('connection', (sock) => {
     }
   });
 
-  // ═══════════════════════════════════════════════════
-  //  SCREENCAST: Ввод — печать текста
-  // ═══════════════════════════════════════════════════
-
   sock.on('screencast:type', async ({ sessionId, text }) => {
     try {
       const session = sessions.get(sessionId);
@@ -232,10 +213,6 @@ io.on('connection', (sock) => {
     }
   });
 
-  // ═══════════════════════════════════════════════════
-  //  SCREENCAST: Ввод — клавиши (Enter, Backspace...)
-  // ═══════════════════════════════════════════════════
-
   sock.on('screencast:keypress', async ({ sessionId, key }) => {
     try {
       const session = sessions.get(sessionId);
@@ -246,10 +223,6 @@ io.on('connection', (sock) => {
       console.log(`[SCREENCAST] Keypress error: ${e.message}`);
     }
   });
-
-  // ═══════════════════════════════════════════════════
-  //  Отключение: очистка всех screencast-сессий
-  // ═══════════════════════════════════════════════════
 
   sock.on('disconnect', (reason) => {
     console.log(`[WS] Client disconnected: ${sock.id} (${reason})`);
@@ -264,6 +237,26 @@ io.on('connection', (sock) => {
         screencastState.delete(key);
         console.log(`[SCREENCAST] Cleaned up: ${key}`);
       }
+    }
+
+    // ═══ Cleanup: остановить задачи этого пользователя ═══
+    const senderTask = senderTasks.get(sock.id);
+    if (senderTask) {
+      senderTask.controller.aborted = true;
+      senderTasks.delete(sock.id);
+      console.log(`[CLEANUP] Stopped sender for ${sock.id}`);
+    }
+    const checkerTask = checkerTasks.get(sock.id);
+    if (checkerTask) {
+      checkerTask.controller.aborted = true;
+      checkerTasks.delete(sock.id);
+      console.log(`[CLEANUP] Stopped checker for ${sock.id}`);
+    }
+    const warmerTask = warmerTasks.get(sock.id);
+    if (warmerTask) {
+      warmerTask.controller.aborted = true;
+      warmerTasks.delete(sock.id);
+      console.log(`[CLEANUP] Stopped warmer for ${sock.id}`);
     }
   });
 });
@@ -286,16 +279,20 @@ const SESSIONS_FILE = path.join(DATA_DIR, 'sessions.json');
 // ─── Хранилище ──────────────────────────────────────────
 const sessions = new Map();
 
-let senderState  = { running: false, controller: null };
-let checkerState = { running: false, controller: null };
-let warmerState  = { running: false, controller: null };
+// ═══════════════════════════════════════════════════════
+//  МНОГОПОЛЬЗОВАТЕЛЬСКИЕ ЗАДАЧИ
+//  Каждый socket.id имеет свою независимую задачу
+// ═══════════════════════════════════════════════════════
+
+const senderTasks  = new Map(); // socketId → { controller, running }
+const checkerTasks = new Map(); // socketId → { controller, running }
+const warmerTasks  = new Map(); // socketId → { controller, running }
 
 // ═══════════════════════════════════════════════════════
 //  CDP SCREENCAST (Live View)
 // ═══════════════════════════════════════════════════════
 
-const screencastState = new Map(); // key: `${sessionId}_${socketId}` → { cdpSession }
-
+const screencastState = new Map();
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
@@ -467,7 +464,6 @@ function broadcastSessions() {
   } catch (e) {}
 }
 
-// ═══ ИЗМЕНЕНО: async для поддержки proxy-chain ═══
 async function createSession(sessionId, displayName, proxy) {
   if (sessions.has(sessionId)) {
     console.log(`[SKIP] ${sessionId} exists`);
@@ -487,14 +483,13 @@ async function createSession(sessionId, displayName, proxy) {
     info: null,
     proxy: proxy || null,
     qr: null,
-    anonymizedProxy: null   // ← для proxy-chain
+    anonymizedProxy: null
   };
 
   sessions.set(sessionId, sessionData);
   broadcastSessions();
 
   try {
-    // ═══ Прокси с авторизацией через proxy-chain ═══
     let actualProxy = proxy;
 
     if (proxy && proxy.includes('@') && proxyChain) {
@@ -683,6 +678,24 @@ function getNextReadyAccount(sessionIds, accountMsgCounts, msgsPerAccount, start
 }
 
 // ═══════════════════════════════════════════════════════
+//  Определение socketId из запроса
+// ═══════════════════════════════════════════════════════
+
+function getSocketFromReq(req) {
+  const socketId = req.headers['x-socket-id'];
+  if (socketId && io.sockets.sockets.get(socketId)) {
+    return io.sockets.sockets.get(socketId);
+  }
+  // Fallback: вернуть первый подключённый сокет или null
+  const sockets = Array.from(io.sockets.sockets.values());
+  return sockets.length > 0 ? sockets[0] : null;
+}
+
+function getSocketId(req) {
+  return req.headers['x-socket-id'] || 'unknown';
+}
+
+// ═══════════════════════════════════════════════════════
 //  API
 // ═══════════════════════════════════════════════════════
 
@@ -731,7 +744,6 @@ app.post('/api/sessions', (req, res) => {
   res.json({ message: 'Создание...', id: sessionId });
 });
 
-// ═══ Переподключение с закрытием proxy-chain ═══
 app.post('/api/sessions/:id/reconnect', async (req, res) => {
   const session = sessions.get(req.params.id);
   if (!session) return res.status(404).json({ error: 'Не найдено' });
@@ -748,7 +760,6 @@ app.post('/api/sessions/:id/reconnect', async (req, res) => {
     console.log(`[RECONNECT] Destroy warning: ${e.message}`);
   }
 
-  // ═══ Закрываем proxy-chain ═══
   if (session.anonymizedProxy && proxyChain) {
     try {
       await proxyChain.closeAnonymizedProxy(session.anonymizedProxy, true);
@@ -769,7 +780,6 @@ app.post('/api/sessions/:id/reconnect', async (req, res) => {
   res.json({ message: 'Переподключение...' });
 });
 
-// ═══ Удаление с закрытием proxy-chain и очисткой диска ═══
 app.delete('/api/sessions/:id', async (req, res) => {
   const session = sessions.get(req.params.id);
   if (!session) return res.status(404).json({ error: 'Не найдено' });
@@ -780,7 +790,6 @@ app.delete('/api/sessions/:id', async (req, res) => {
     if (session.client) await session.client.destroy().catch(() => {});
   } catch (e) {}
 
-  // ═══ Закрываем proxy-chain ═══
   if (session.anonymizedProxy && proxyChain) {
     try {
       await proxyChain.closeAnonymizedProxy(session.anonymizedProxy, true);
@@ -809,10 +818,17 @@ app.post('/api/upload', upload.single('file'), (req, res) => {
   res.json({ path: filePath, count: numbers.length });
 });
 
-// ─── РАССЫЛКА ───────────────────────────────────────────
+// ═══════════════════════════════════════════════════════
+//  РАССЫЛКА (многопользовательская)
+// ═══════════════════════════════════════════════════════
 
 app.post('/api/sender/start', (req, res) => {
-  if (senderState.running) return res.status(400).json({ error: 'Уже запущено' });
+  const socketId = getSocketId(req);
+  
+  // Проверяем есть ли уже задача у ЭТОГО пользователя
+  if (senderTasks.has(socketId)) {
+    return res.status(400).json({ error: 'У вас уже запущена рассылка' });
+  }
 
   const { sessionIds, numbersFilePath, messageTemplate,
     msgsPerAccount, totalMessages, typingDelayMin, typingDelayMax,
@@ -840,7 +856,9 @@ app.post('/api/sender/start', (req, res) => {
   if (!numbers.length) return res.status(400).json({ error: 'Файл пустой' });
 
   const controller = { aborted: false };
-  senderState = { running: true, controller };
+  senderTasks.set(socketId, { controller, running: true });
+
+  const sock = getSocketFromReq(req);
 
   (async () => {
     let totalSent = 0;
@@ -849,11 +867,17 @@ app.post('/api/sender/start', (req, res) => {
 
     try {
       for (let i = 0; i < numbers.length; i++) {
-        if (controller.aborted) { io.emit('sender:log', '-- Стоп'); break; }
+        if (controller.aborted) {
+          if (sock) sock.emit('sender:log', '-- Стоп');
+          break;
+        }
         if (totalMessages > 0 && totalSent >= totalMessages) break;
 
         const found = getNextReadyAccount(sessionIds, accountMsgCounts, msgsPerAccount, currentIdx);
-        if (!found) { io.emit('sender:log', '[!] Нет доступных аккаунтов'); break; }
+        if (!found) {
+          if (sock) sock.emit('sender:log', '[!] Нет доступных аккаунтов');
+          break;
+        }
 
         const { session, index } = found;
         currentIdx = index;
@@ -882,26 +906,31 @@ app.post('/api/sender/start', (req, res) => {
           accountMsgCounts[session.id] = (accountMsgCounts[session.id] || 0) + 1;
           currentIdx = (currentIdx + 1) % sessionIds.length;
 
-          io.emit('sender:progress', { sent: totalSent, remaining: numbers.length - i - 1, account: session.displayName });
-          io.emit('sender:log', `[OK] ${session.displayName} -> +${num}`);
+          if (sock) {
+            sock.emit('sender:progress', { sent: totalSent, remaining: numbers.length - i - 1, account: session.displayName });
+            sock.emit('sender:log', `[OK] ${session.displayName} -> +${num}`);
+          }
 
           if (pauseAfterMsgs > 0 && totalSent % pauseAfterMsgs === 0) {
             const dur = (Math.random() * (pauseDurationMax - pauseDurationMin) + pauseDurationMin) * 1000;
-            io.emit('sender:log', `[PAUSE] ${Math.round(dur/1000)}s`);
+            if (sock) sock.emit('sender:log', `[PAUSE] ${Math.round(dur/1000)}s`);
             const ps = Date.now();
             while (Date.now() - ps < dur && !controller.aborted) await sleep(300);
           }
         } catch (err) {
-          io.emit('sender:log', `[ERR] +${num}: ${err.message}`);
+          if (sock) sock.emit('sender:log', `[ERR] +${num}: ${err.message}`);
           currentIdx = (currentIdx + 1) % sessionIds.length;
         }
       }
     } catch (err) {
-      io.emit('sender:error', err.message);
+      if (sock) sock.emit('sender:error', err.message);
     } finally {
-      senderState = { running: false, controller: null };
-      io.emit('sender:complete', { totalSent });
-      io.emit('sender:log', `[DONE] Отправлено: ${totalSent}`);
+      senderTasks.delete(socketId);
+      if (sock) {
+        sock.emit('sender:complete', { totalSent });
+        sock.emit('sender:log', `[DONE] Отправлено: ${totalSent}`);
+      }
+      console.log(`[SENDER] Finished for ${socketId}: ${totalSent} sent`);
     }
   })();
 
@@ -909,14 +938,24 @@ app.post('/api/sender/start', (req, res) => {
 });
 
 app.post('/api/sender/stop', (req, res) => {
-  if (senderState.controller) senderState.controller.aborted = true;
+  const socketId = getSocketId(req);
+  const task = senderTasks.get(socketId);
+  if (task) {
+    task.controller.aborted = true;
+  }
   res.json({ message: 'Стоп' });
 });
 
-// ─── ЧЕКЕР ──────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════
+//  ЧЕКЕР (многопользовательский)
+// ═══════════════════════════════════════════════════════
 
 app.post('/api/checker/start', (req, res) => {
-  if (checkerState.running) return res.status(400).json({ error: 'Уже запущено' });
+  const socketId = getSocketId(req);
+  
+  if (checkerTasks.has(socketId)) {
+    return res.status(400).json({ error: 'У вас уже запущена проверка' });
+  }
 
   const { sessionId, numbersFilePath } = req.body;
 
@@ -928,13 +967,15 @@ app.post('/api/checker/start', (req, res) => {
   if (!numbers.length) return res.status(400).json({ error: 'Пусто' });
 
   const controller = { aborted: false };
-  checkerState = { running: true, controller };
+  checkerTasks.set(socketId, { controller, running: true });
+
+  const sock = getSocketFromReq(req);
 
   (async () => {
     const session = sessions.get(sessionId);
     if (!session?.client || session.status !== 'ready') {
-      io.emit('checker:error', 'Аккаунт не готов');
-      checkerState = { running: false, controller: null };
+      if (sock) sock.emit('checker:error', 'Аккаунт не готов');
+      checkerTasks.delete(socketId);
       return;
     }
 
@@ -942,7 +983,10 @@ app.post('/api/checker/start', (req, res) => {
     let checked = 0;
 
     for (const raw of numbers) {
-      if (controller.aborted) { io.emit('checker:log', '-- Стоп'); break; }
+      if (controller.aborted) {
+        if (sock) sock.emit('checker:log', '-- Стоп');
+        break;
+      }
 
       const num = raw.replace(/[^\d]/g, '');
       if (!num) { checked++; continue; }
@@ -951,16 +995,16 @@ app.post('/api/checker/start', (req, res) => {
         const result = await session.client.getNumberId(num);
         if (result) {
           valid.push(num);
-          io.emit('checker:log', `[YES] +${num}`);
+          if (sock) sock.emit('checker:log', `[YES] +${num}`);
         } else {
-          io.emit('checker:log', `[NO] +${num}`);
+          if (sock) sock.emit('checker:log', `[NO] +${num}`);
         }
       } catch {
-        io.emit('checker:log', `[ERR] +${num}`);
+        if (sock) sock.emit('checker:log', `[ERR] +${num}`);
       }
 
       checked++;
-      io.emit('checker:progress', { checked, total: numbers.length, valid: valid.length });
+      if (sock) sock.emit('checker:progress', { checked, total: numbers.length, valid: valid.length });
 
       const ws = Date.now();
       while (Date.now() - ws < 1500 && !controller.aborted) await sleep(200);
@@ -970,23 +1014,36 @@ app.post('/api/checker/start', (req, res) => {
     const outPath = path.join(DATA_DIR, resultFilename);
     fs.writeFileSync(outPath, valid.join('\n'));
 
-    io.emit('checker:complete', { total: numbers.length, valid: valid.length, filename: resultFilename });
-    io.emit('checker:log', `[DONE] ${valid.length}/${numbers.length}`);
-    checkerState = { running: false, controller: null };
+    if (sock) {
+      sock.emit('checker:complete', { total: numbers.length, valid: valid.length, filename: resultFilename });
+      sock.emit('checker:log', `[DONE] ${valid.length}/${numbers.length}`);
+    }
+    checkerTasks.delete(socketId);
+    console.log(`[CHECKER] Finished for ${socketId}: ${valid.length}/${numbers.length}`);
   })();
 
   res.json({ message: 'Запущено' });
 });
 
 app.post('/api/checker/stop', (req, res) => {
-  if (checkerState.controller) checkerState.controller.aborted = true;
+  const socketId = getSocketId(req);
+  const task = checkerTasks.get(socketId);
+  if (task) {
+    task.controller.aborted = true;
+  }
   res.json({ message: 'Стоп' });
 });
 
-// ─── ПРОГРЕВ ────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════
+//  ПРОГРЕВ (многопользовательский)
+// ═══════════════════════════════════════════════════════
 
 app.post('/api/warmer/start', (req, res) => {
-  if (warmerState.running) return res.status(400).json({ error: 'Уже запущено' });
+  const socketId = getSocketId(req);
+  
+  if (warmerTasks.has(socketId)) {
+    return res.status(400).json({ error: 'У вас уже запущен прогрев' });
+  }
 
   const { sessionIds, numbersFilePath, msgsPerAccount, totalMessages,
     typingDelayMin, typingDelayMax, pauseAfterMsgs, pauseDurationMin, pauseDurationMax } = req.body;
@@ -1005,7 +1062,9 @@ app.post('/api/warmer/start', (req, res) => {
   if (!numbers.length) return res.status(400).json({ error: 'Пусто' });
 
   const controller = { aborted: false };
-  warmerState = { running: true, controller };
+  warmerTasks.set(socketId, { controller, running: true });
+
+  const sock = getSocketFromReq(req);
 
   (async () => {
     let totalSent = 0;
@@ -1013,11 +1072,17 @@ app.post('/api/warmer/start', (req, res) => {
     let currentIdx = 0;
 
     for (let i = 0; i < numbers.length; i++) {
-      if (controller.aborted) { io.emit('warmer:log', '-- Стоп'); break; }
+      if (controller.aborted) {
+        if (sock) sock.emit('warmer:log', '-- Стоп');
+        break;
+      }
       if (totalMessages > 0 && totalSent >= totalMessages) break;
 
       const found = getNextReadyAccount(sessionIds, accountMsgCounts, msgsPerAccount, currentIdx);
-      if (!found) { io.emit('warmer:log', '[!] Нет доступных аккаунтов'); break; }
+      if (!found) {
+        if (sock) sock.emit('warmer:log', '[!] Нет доступных аккаунтов');
+        break;
+      }
 
       const { session, index } = found;
       currentIdx = index;
@@ -1043,8 +1108,10 @@ app.post('/api/warmer/start', (req, res) => {
         accountMsgCounts[session.id] = (accountMsgCounts[session.id] || 0) + 1;
         currentIdx = (currentIdx + 1) % sessionIds.length;
 
-        io.emit('warmer:progress', { sent: totalSent, remaining: numbers.length - i - 1 });
-        io.emit('warmer:log', `[OK] ${session.displayName} -> +${num}`);
+        if (sock) {
+          sock.emit('warmer:progress', { sent: totalSent, remaining: numbers.length - i - 1 });
+          sock.emit('warmer:log', `[OK] ${session.displayName} -> +${num}`);
+        }
 
         if (pauseAfterMsgs > 0 && totalSent % pauseAfterMsgs === 0) {
           const dur = (Math.random() * (pauseDurationMax - pauseDurationMin) + pauseDurationMin) * 1000;
@@ -1052,26 +1119,38 @@ app.post('/api/warmer/start', (req, res) => {
           while (Date.now() - ps < dur && !controller.aborted) await sleep(300);
         }
       } catch (err) {
-        io.emit('warmer:log', `[ERR] ${err.message}`);
+        if (sock) sock.emit('warmer:log', `[ERR] ${err.message}`);
         currentIdx = (currentIdx + 1) % sessionIds.length;
       }
     }
 
-    warmerState = { running: false, controller: null };
-    io.emit('warmer:complete', { totalSent });
-    io.emit('warmer:log', `[DONE] Отправлено: ${totalSent}`);
+    warmerTasks.delete(socketId);
+    if (sock) {
+      sock.emit('warmer:complete', { totalSent });
+      sock.emit('warmer:log', `[DONE] Отправлено: ${totalSent}`);
+    }
+    console.log(`[WARMER] Finished for ${socketId}: ${totalSent} sent`);
   })();
 
   res.json({ message: 'Запущено' });
 });
 
 app.post('/api/warmer/stop', (req, res) => {
-  if (warmerState.controller) warmerState.controller.aborted = true;
+  const socketId = getSocketId(req);
+  const task = warmerTasks.get(socketId);
+  if (task) {
+    task.controller.aborted = true;
+  }
   res.json({ message: 'Стоп' });
 });
 
 app.get('/api/status', (req, res) => {
-  res.json({ sender: senderState.running, checker: checkerState.running, warmer: warmerState.running });
+  const socketId = getSocketId(req);
+  res.json({ 
+    sender: senderTasks.has(socketId), 
+    checker: checkerTasks.has(socketId), 
+    warmer: warmerTasks.has(socketId) 
+  });
 });
 
 // ─── СКАЧИВАНИЕ РЕЗУЛЬТАТОВ ─────────────────────────────
@@ -1099,7 +1178,6 @@ app.post('/api/test-proxy', async (req, res) => {
   const startTime = Date.now();
 
   try {
-    // Если прокси с авторизацией — сначала анонимизируем
     let testTarget = proxy;
     let anonymized = null;
 

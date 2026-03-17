@@ -1,6 +1,5 @@
 import { io } from 'socket.io-client';
 
-// В продакшене — тот же хост, в dev — localhost:3001
 const URL = import.meta.env.PROD ? '' : 'http://localhost:3001';
 
 let socketInstance = null;
@@ -25,6 +24,11 @@ export function getSocket() {
   return socketInstance;
 }
 
+// ═══ НОВОЕ: получить socket.id для заголовка ═══
+export function getSocketId() {
+  return socketInstance?.id || '';
+}
+
 export function disconnectSocket() {
   if (socketInstance) {
     socketInstance.disconnect();
@@ -32,8 +36,6 @@ export function disconnectSocket() {
   }
 }
 
-// Прокси-объект для обратной совместимости с import { socket }
-// Все вызовы socket.on/off/emit будут проксированы на текущий socketInstance
 export const socket = new Proxy({}, {
   get(_, prop) {
     if (!socketInstance) return () => {};
