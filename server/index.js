@@ -59,7 +59,7 @@ try {
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server, { 
+const io = new Server(server, {
   cors: { origin: '*' },
   pingTimeout: 120000,
   pingInterval: 25000,
@@ -80,7 +80,7 @@ function generateToken() {
 function authMiddleware(req, res, next) {
   if (!AUTH_PASSWORD) return next();
   if (req.path === '/auth/login' || req.path === '/auth/check') return next();
-  
+
   const token = req.headers['x-auth-token'];
   if (!token || !authTokens.has(token)) {
     return res.status(401).json({ error: 'Unauthorized' });
@@ -105,6 +105,22 @@ io.on('connection', (sock) => {
   console.log(`[WS] Client connected: ${sock.id}`);
   sock.emit('sessions:update', getSessionsList());
 
+  // ═══ Восстановить состояние для переподключившегося клиента ═══
+  const token = sock.handshake.auth?.token;
+  if (token) {
+    const userId = token !== 'no-auth' ? `user_${token.substring(0, 16)}` : 'unknown';
+
+    if (senderTasks.has(userId) && senderLastProgress.has(userId)) {
+      sock.emit('sender:running', true);
+      sock.emit('sender:progress', senderLastProgress.get(userId));
+    }
+
+    if (senderLastComplete.has(userId)) {
+      sock.emit('sender:complete', senderLastComplete.get(userId));
+      senderLastComplete.delete(userId);
+    }
+  }
+
   // ═══════════════════════════════════════════════════
   //  SCREENCAST: Запуск трансляции
   // ═══════════════════════════════════════════════════
@@ -127,7 +143,7 @@ io.on('connection', (sock) => {
         try {
           await existing.cdpSession.send('Page.stopScreencast');
           await existing.cdpSession.detach();
-        } catch (e) {}
+        } catch (e) { }
         screencastState.delete(key);
       }
 
@@ -145,7 +161,7 @@ io.on('connection', (sock) => {
         try {
           await cdpSession.send('Page.screencastFrameAck', { sessionId: frameId });
           sock.emit('screencast:frame', { sessionId, data, metadata });
-        } catch (e) {}
+        } catch (e) { }
       });
 
       await cdpSession.send('Page.startScreencast', {
@@ -173,7 +189,7 @@ io.on('connection', (sock) => {
       try {
         await state.cdpSession.send('Page.stopScreencast');
         await state.cdpSession.detach();
-      } catch (e) {}
+      } catch (e) { }
       screencastState.delete(key);
       console.log(`[SCREENCAST] Stopped: ${sessionId} → ${sock.id}`);
     }
@@ -227,36 +243,15 @@ io.on('connection', (sock) => {
   sock.on('disconnect', (reason) => {
     console.log(`[WS] Client disconnected: ${sock.id} (${reason})`);
 
-    // Cleanup screencast
     for (const [key, state] of screencastState) {
       if (key.endsWith(`_${sock.id}`)) {
         try {
-          state.cdpSession.send('Page.stopScreencast').catch(() => {});
-          state.cdpSession.detach().catch(() => {});
-        } catch (e) {}
+          state.cdpSession.send('Page.stopScreencast').catch(() => { });
+          state.cdpSession.detach().catch(() => { });
+        } catch (e) { }
         screencastState.delete(key);
         console.log(`[SCREENCAST] Cleaned up: ${key}`);
       }
-    }
-
-    // ═══ Cleanup: остановить задачи этого пользователя ═══
-    const senderTask = senderTasks.get(sock.id);
-    if (senderTask) {
-      senderTask.controller.aborted = true;
-      senderTasks.delete(sock.id);
-      console.log(`[CLEANUP] Stopped sender for ${sock.id}`);
-    }
-    const checkerTask = checkerTasks.get(sock.id);
-    if (checkerTask) {
-      checkerTask.controller.aborted = true;
-      checkerTasks.delete(sock.id);
-      console.log(`[CLEANUP] Stopped checker for ${sock.id}`);
-    }
-    const warmerTask = warmerTasks.get(sock.id);
-    if (warmerTask) {
-      warmerTask.controller.aborted = true;
-      warmerTasks.delete(sock.id);
-      console.log(`[CLEANUP] Stopped warmer for ${sock.id}`);
     }
   });
 });
@@ -284,9 +279,13 @@ const sessions = new Map();
 //  Каждый socket.id имеет свою независимую задачу
 // ═══════════════════════════════════════════════════════
 
-const senderTasks  = new Map(); // socketId → { controller, running }
+const senderTasks = new Map(); // socketId → { controller, running }
 const checkerTasks = new Map(); // socketId → { controller, running }
-const warmerTasks  = new Map(); // socketId → { controller, running }
+const warmerTasks = new Map(); // socketId → { controller, running }
+
+// ═══ НОВОЕ: кеш последнего прогресса для переподключившихся клиентов ═══
+const senderLastProgress = new Map(); // userId → { sent, remaining, account }
+const senderLastComplete = new Map(); // userId → { totalSent }
 
 // ═══════════════════════════════════════════════════════
 //  CDP SCREENCAST (Live View)
@@ -313,7 +312,7 @@ function cleanupStaleLocks(sessionId) {
         fs.lstatSync(p);
         fs.unlinkSync(p);
         console.log(`[CLEANUP] Removed lock: ${p}`);
-      } catch (e) {}
+      } catch (e) { }
     });
   }
 
@@ -325,17 +324,18 @@ function cleanupStaleLocks(sessionId) {
         try { return d.isDirectory(); } catch (e) { return false; }
       })
       .forEach(d => removeLocks(path.join(profileDir, d.name)));
-  } catch (e) {}
+  } catch (e) { }
 }
 
 function cleanupCacheFiles(sessionId) {
   const profileDir = path.join(AUTH_DATA_DIR, `session-${sessionId}`);
   if (!fs.existsSync(profileDir)) return;
 
+  // ═══ ИСПРАВЛЕНО: убраны IndexedDB, Local Storage, Session Storage ═══
+  // Они содержат данные авторизации WhatsApp!
   const cacheDirs = [
     'Cache', 'Code Cache', 'GPUCache', 'GrShaderCache',
-    'ShaderCache', 'Service Worker', 'blob_storage',
-    'IndexedDB', 'Local Storage', 'Session Storage'
+    'ShaderCache'
   ];
 
   function cleanDir(baseDir) {
@@ -345,7 +345,7 @@ function cleanupCacheFiles(sessionId) {
         if (fs.existsSync(p)) {
           fs.rmSync(p, { recursive: true, force: true });
         }
-      } catch (e) {}
+      } catch (e) { }
     });
   }
 
@@ -413,23 +413,64 @@ function loadSavedSessions() {
     console.log('[RESTORE] No saved sessions');
     return;
   }
-  
+
   try {
     const raw = fs.readFileSync(SESSIONS_FILE, 'utf-8');
     if (!raw.trim()) return;
-    
+
     const data = JSON.parse(raw);
     if (!Array.isArray(data) || data.length === 0) return;
-    
-    console.log(`[RESTORE] Loading ${data.length} sessions...`);
-    
-    data.forEach((sess, index) => {
-      if (sess.id && sess.displayName) {
-        setTimeout(() => {
-          createSession(sess.id, sess.displayName, sess.proxy);
-        }, index * 5000);
+
+    console.log(`[RESTORE] Will load ${data.length} sessions sequentially...`);
+
+    // ═══ ПОСЛЕДОВАТЕЛЬНАЯ ЗАГРУЗКА ═══
+    // Ждём пока текущая сессия станет ready или упадёт,
+    // только потом запускаем следующую
+    (async () => {
+      for (let i = 0; i < data.length; i++) {
+        const sess = data[i];
+        if (!sess.id || !sess.displayName) continue;
+
+        console.log(`[RESTORE] ${i + 1}/${data.length}: ${sess.displayName}...`);
+
+        await createSession(sess.id, sess.displayName, sess.proxy);
+
+        // Ждём пока сессия станет ready, auth_failure или пройдёт таймаут
+        const maxWait = 120000; // 2 минуты максимум на одну сессию
+        const startTime = Date.now();
+
+        while (Date.now() - startTime < maxWait) {
+          const session = sessions.get(sess.id);
+          if (!session) break;
+
+          if (session.status === 'ready') {
+            console.log(`[RESTORE] ${sess.displayName} → ready ✓`);
+            break;
+          }
+
+          if (session.status === 'auth_failure' || session.status === 'disconnected') {
+            console.log(`[RESTORE] ${sess.displayName} → ${session.status} ✗`);
+            break;
+          }
+
+          await sleep(2000);
+        }
+
+        // Проверяем память перед следующей
+        const memUsage = process.memoryUsage();
+        const heapMB = Math.round(memUsage.heapUsed / 1024 / 1024);
+        console.log(`[RESTORE] Memory: ${heapMB}MB heap used`);
+
+        // Пауза между сессиями
+        if (i < data.length - 1) {
+          console.log(`[RESTORE] Waiting 5s before next...`);
+          await sleep(5000);
+        }
       }
-    });
+
+      console.log(`[RESTORE] All sessions loaded.`);
+    })();
+
   } catch (err) {
     console.error('[RESTORE] Error:', err.message);
   }
@@ -461,7 +502,7 @@ function getSessionsList() {
 function broadcastSessions() {
   try {
     io.emit('sessions:update', getSessionsList());
-  } catch (e) {}
+  } catch (e) { }
 }
 
 async function createSession(sessionId, displayName, proxy) {
@@ -522,7 +563,7 @@ async function createSession(sessionId, displayName, proxy) {
     if (actualProxy) puppeteerArgs.push(`--proxy-server=${actualProxy}`);
 
     const client = new Client({
-      authStrategy: new LocalAuth({ 
+      authStrategy: new LocalAuth({
         clientId: sessionId,
         dataPath: AUTH_DATA_DIR
       }),
@@ -551,7 +592,7 @@ async function createSession(sessionId, displayName, proxy) {
       sessionData.status = 'authenticated';
       sessionData.qr = null;
       broadcastSessions();
-      
+
       setTimeout(() => {
         if (sessionData.status === 'authenticated') {
           console.log(`[AUTH-TIMEOUT] ${displayName} - forcing ready check`);
@@ -603,7 +644,7 @@ async function createSession(sessionId, displayName, proxy) {
 
     client.on('change_state', (state) => {
       console.log(`[STATE] ${displayName}: ${state}`);
-      
+
       if (state === 'CONNECTED' && sessionData.status !== 'ready') {
         setTimeout(() => {
           if (sessionData.status !== 'ready') {
@@ -641,7 +682,7 @@ async function createSession(sessionId, displayName, proxy) {
             phone: client.info?.wid?.user || 'Unknown',
             name: client.info?.pushname || displayName
           };
-        } catch (e) {}
+        } catch (e) { }
         broadcastSessions();
         saveSessions();
       }
@@ -670,7 +711,7 @@ function getNextReadyAccount(sessionIds, accountMsgCounts, msgsPerAccount, start
     const id = sessionIds[idx];
     const session = sessions.get(id);
     if (session?.status === 'ready' && session.client &&
-        (msgsPerAccount <= 0 || (accountMsgCounts[id] || 0) < msgsPerAccount)) {
+      (msgsPerAccount <= 0 || (accountMsgCounts[id] || 0) < msgsPerAccount)) {
       return { session, index: idx };
     }
   }
@@ -678,21 +719,38 @@ function getNextReadyAccount(sessionIds, accountMsgCounts, msgsPerAccount, start
 }
 
 // ═══════════════════════════════════════════════════════
-//  Определение socketId из запроса
+//  Идентификация пользователя по auth-токену (стабильный)
+//  socket.id меняется при переподключении — нельзя использовать
 // ═══════════════════════════════════════════════════════
 
-function getSocketFromReq(req) {
+function getUserId(req) {
+  const token = req.headers['x-auth-token'];
+  if (token && token !== 'no-auth') return `user_${token.substring(0, 16)}`;
   const socketId = req.headers['x-socket-id'];
-  if (socketId && io.sockets.sockets.get(socketId)) {
-    return io.sockets.sockets.get(socketId);
-  }
-  // Fallback: вернуть первый подключённый сокет или null
-  const sockets = Array.from(io.sockets.sockets.values());
-  return sockets.length > 0 ? sockets[0] : null;
+  if (socketId) return socketId;
+  return 'unknown';
 }
 
-function getSocketId(req) {
-  return req.headers['x-socket-id'] || 'unknown';
+function createEmitter(req) {
+  const authToken = req.headers['x-auth-token'];
+
+  return function emitToUser(event, data) {
+    try {
+      // Ищем ЖИВОЙ сокет каждый раз при вызове (не один раз при старте)
+      for (const [, sock] of io.sockets.sockets) {
+        if (
+          sock.connected &&
+          sock.handshake.auth?.token === authToken
+        ) {
+          sock.emit(event, data);
+          return;
+        }
+      }
+      // Сокет не найден — клиент временно отключён, пропускаем
+    } catch (e) {
+      // Игнорируем ошибки эмита
+    }
+  };
 }
 
 // ═══════════════════════════════════════════════════════
@@ -754,7 +812,7 @@ app.post('/api/sessions/:id/reconnect', async (req, res) => {
 
   try {
     if (session.client) {
-      await session.client.destroy().catch(() => {});
+      await session.client.destroy().catch(() => { });
     }
   } catch (e) {
     console.log(`[RECONNECT] Destroy warning: ${e.message}`);
@@ -764,7 +822,7 @@ app.post('/api/sessions/:id/reconnect', async (req, res) => {
     try {
       await proxyChain.closeAnonymizedProxy(session.anonymizedProxy, true);
       console.log(`[PROXY] Closed anonymized proxy for ${displayName}`);
-    } catch (e) {}
+    } catch (e) { }
   }
 
   sessions.delete(sessionId);
@@ -787,14 +845,14 @@ app.delete('/api/sessions/:id', async (req, res) => {
   const sessionId = req.params.id;
 
   try {
-    if (session.client) await session.client.destroy().catch(() => {});
-  } catch (e) {}
+    if (session.client) await session.client.destroy().catch(() => { });
+  } catch (e) { }
 
   if (session.anonymizedProxy && proxyChain) {
     try {
       await proxyChain.closeAnonymizedProxy(session.anonymizedProxy, true);
       console.log(`[PROXY] Closed anonymized proxy for ${session.displayName}`);
-    } catch (e) {}
+    } catch (e) { }
   }
 
   sessions.delete(sessionId);
@@ -823,10 +881,9 @@ app.post('/api/upload', upload.single('file'), (req, res) => {
 // ═══════════════════════════════════════════════════════
 
 app.post('/api/sender/start', (req, res) => {
-  const socketId = getSocketId(req);
-  
-  // Проверяем есть ли уже задача у ЭТОГО пользователя
-  if (senderTasks.has(socketId)) {
+  const userId = getUserId(req);
+
+  if (senderTasks.has(userId)) {
     return res.status(400).json({ error: 'У вас уже запущена рассылка' });
   }
 
@@ -856,9 +913,8 @@ app.post('/api/sender/start', (req, res) => {
   if (!numbers.length) return res.status(400).json({ error: 'Файл пустой' });
 
   const controller = { aborted: false };
-  senderTasks.set(socketId, { controller, running: true });
-
-  const sock = getSocketFromReq(req);
+  const emitToUser = createEmitter(req);
+  senderTasks.set(userId, { controller, running: true });
 
   (async () => {
     let totalSent = 0;
@@ -868,14 +924,14 @@ app.post('/api/sender/start', (req, res) => {
     try {
       for (let i = 0; i < numbers.length; i++) {
         if (controller.aborted) {
-          if (sock) sock.emit('sender:log', '-- Стоп');
+          emitToUser('sender:log', '-- Стоп');
           break;
         }
         if (totalMessages > 0 && totalSent >= totalMessages) break;
 
         const found = getNextReadyAccount(sessionIds, accountMsgCounts, msgsPerAccount, currentIdx);
         if (!found) {
-          if (sock) sock.emit('sender:log', '[!] Нет доступных аккаунтов');
+          emitToUser('sender:log', '[!] Нет доступных аккаунтов');
           break;
         }
 
@@ -894,7 +950,7 @@ app.post('/api/sender/start', (req, res) => {
           try {
             const chat = await session.client.getChatById(chatId);
             await chat.sendStateTyping();
-          } catch (_) {}
+          } catch (_) { }
 
           const delay = (Math.random() * (typingDelayMax - typingDelayMin) + typingDelayMin) * 1000;
           const start = Date.now();
@@ -906,31 +962,33 @@ app.post('/api/sender/start', (req, res) => {
           accountMsgCounts[session.id] = (accountMsgCounts[session.id] || 0) + 1;
           currentIdx = (currentIdx + 1) % sessionIds.length;
 
-          if (sock) {
-            sock.emit('sender:progress', { sent: totalSent, remaining: numbers.length - i - 1, account: session.displayName });
-            sock.emit('sender:log', `[OK] ${session.displayName} -> +${num}`);
-          }
+          const progressData = { sent: totalSent, remaining: numbers.length - i - 1, account: session.displayName };
+          senderLastProgress.set(userId, progressData);
+          emitToUser('sender:progress', progressData);
+          emitToUser('sender:log', `[OK] ${session.displayName} -> +${num}`);
 
           if (pauseAfterMsgs > 0 && totalSent % pauseAfterMsgs === 0) {
             const dur = (Math.random() * (pauseDurationMax - pauseDurationMin) + pauseDurationMin) * 1000;
-            if (sock) sock.emit('sender:log', `[PAUSE] ${Math.round(dur/1000)}s`);
+            emitToUser('sender:log', `[PAUSE] ${Math.round(dur / 1000)}s`);
             const ps = Date.now();
             while (Date.now() - ps < dur && !controller.aborted) await sleep(300);
           }
         } catch (err) {
-          if (sock) sock.emit('sender:log', `[ERR] +${num}: ${err.message}`);
+          emitToUser('sender:log', `[ERR] +${num}: ${err.message}`);
           currentIdx = (currentIdx + 1) % sessionIds.length;
         }
       }
     } catch (err) {
-      if (sock) sock.emit('sender:error', err.message);
+      emitToUser('sender:error', err.message);
     } finally {
-      senderTasks.delete(socketId);
-      if (sock) {
-        sock.emit('sender:complete', { totalSent });
-        sock.emit('sender:log', `[DONE] Отправлено: ${totalSent}`);
-      }
-      console.log(`[SENDER] Finished for ${socketId}: ${totalSent} sent`);
+      senderTasks.delete(userId);
+      senderLastComplete.set(userId, { totalSent });
+      senderLastProgress.delete(userId);
+      emitToUser('sender:complete', { totalSent });
+      // Очистить через 5 минут
+      setTimeout(() => senderLastComplete.delete(userId), 5 * 60 * 1000);
+      emitToUser('sender:log', `[DONE] Отправлено: ${totalSent}`);
+      console.log(`[SENDER] Finished for ${userId}: ${totalSent} sent`);
     }
   })();
 
@@ -938,8 +996,8 @@ app.post('/api/sender/start', (req, res) => {
 });
 
 app.post('/api/sender/stop', (req, res) => {
-  const socketId = getSocketId(req);
-  const task = senderTasks.get(socketId);
+  const userId = getUserId(req);
+  const task = senderTasks.get(userId);
   if (task) {
     task.controller.aborted = true;
   }
@@ -951,9 +1009,9 @@ app.post('/api/sender/stop', (req, res) => {
 // ═══════════════════════════════════════════════════════
 
 app.post('/api/checker/start', (req, res) => {
-  const socketId = getSocketId(req);
-  
-  if (checkerTasks.has(socketId)) {
+  const userId = getUserId(req);
+
+  if (checkerTasks.has(userId)) {
     return res.status(400).json({ error: 'У вас уже запущена проверка' });
   }
 
@@ -967,15 +1025,14 @@ app.post('/api/checker/start', (req, res) => {
   if (!numbers.length) return res.status(400).json({ error: 'Пусто' });
 
   const controller = { aborted: false };
-  checkerTasks.set(socketId, { controller, running: true });
-
-  const sock = getSocketFromReq(req);
+  const emitToUser = createEmitter(req);
+  checkerTasks.set(userId, { controller, running: true });
 
   (async () => {
     const session = sessions.get(sessionId);
     if (!session?.client || session.status !== 'ready') {
-      if (sock) sock.emit('checker:error', 'Аккаунт не готов');
-      checkerTasks.delete(socketId);
+      emitToUser('checker:error', 'Аккаунт не готов');
+      checkerTasks.delete(userId);
       return;
     }
 
@@ -984,7 +1041,7 @@ app.post('/api/checker/start', (req, res) => {
 
     for (const raw of numbers) {
       if (controller.aborted) {
-        if (sock) sock.emit('checker:log', '-- Стоп');
+        emitToUser('checker:log', '-- Стоп');
         break;
       }
 
@@ -995,16 +1052,16 @@ app.post('/api/checker/start', (req, res) => {
         const result = await session.client.getNumberId(num);
         if (result) {
           valid.push(num);
-          if (sock) sock.emit('checker:log', `[YES] +${num}`);
+          emitToUser('checker:log', `[YES] +${num}`);
         } else {
-          if (sock) sock.emit('checker:log', `[NO] +${num}`);
+          emitToUser('checker:log', `[NO] +${num}`);
         }
       } catch {
-        if (sock) sock.emit('checker:log', `[ERR] +${num}`);
+        emitToUser('checker:log', `[ERR] +${num}`);
       }
 
       checked++;
-      if (sock) sock.emit('checker:progress', { checked, total: numbers.length, valid: valid.length });
+      emitToUser('checker:progress', { checked, total: numbers.length, valid: valid.length });
 
       const ws = Date.now();
       while (Date.now() - ws < 1500 && !controller.aborted) await sleep(200);
@@ -1014,20 +1071,18 @@ app.post('/api/checker/start', (req, res) => {
     const outPath = path.join(DATA_DIR, resultFilename);
     fs.writeFileSync(outPath, valid.join('\n'));
 
-    if (sock) {
-      sock.emit('checker:complete', { total: numbers.length, valid: valid.length, filename: resultFilename });
-      sock.emit('checker:log', `[DONE] ${valid.length}/${numbers.length}`);
-    }
-    checkerTasks.delete(socketId);
-    console.log(`[CHECKER] Finished for ${socketId}: ${valid.length}/${numbers.length}`);
+    emitToUser('checker:complete', { total: numbers.length, valid: valid.length, filename: resultFilename });
+    emitToUser('checker:log', `[DONE] ${valid.length}/${numbers.length}`);
+    checkerTasks.delete(userId);
+    console.log(`[CHECKER] Finished for ${userId}: ${valid.length}/${numbers.length}`);
   })();
 
   res.json({ message: 'Запущено' });
 });
 
 app.post('/api/checker/stop', (req, res) => {
-  const socketId = getSocketId(req);
-  const task = checkerTasks.get(socketId);
+  const userId = getUserId(req);
+  const task = checkerTasks.get(userId);
   if (task) {
     task.controller.aborted = true;
   }
@@ -1039,9 +1094,9 @@ app.post('/api/checker/stop', (req, res) => {
 // ═══════════════════════════════════════════════════════
 
 app.post('/api/warmer/start', (req, res) => {
-  const socketId = getSocketId(req);
-  
-  if (warmerTasks.has(socketId)) {
+  const userId = getUserId(req);
+
+  if (warmerTasks.has(userId)) {
     return res.status(400).json({ error: 'У вас уже запущен прогрев' });
   }
 
@@ -1062,9 +1117,8 @@ app.post('/api/warmer/start', (req, res) => {
   if (!numbers.length) return res.status(400).json({ error: 'Пусто' });
 
   const controller = { aborted: false };
-  warmerTasks.set(socketId, { controller, running: true });
-
-  const sock = getSocketFromReq(req);
+  const emitToUser = createEmitter(req);
+  warmerTasks.set(userId, { controller, running: true });
 
   (async () => {
     let totalSent = 0;
@@ -1073,14 +1127,14 @@ app.post('/api/warmer/start', (req, res) => {
 
     for (let i = 0; i < numbers.length; i++) {
       if (controller.aborted) {
-        if (sock) sock.emit('warmer:log', '-- Стоп');
+        emitToUser('warmer:log', '-- Стоп');
         break;
       }
       if (totalMessages > 0 && totalSent >= totalMessages) break;
 
       const found = getNextReadyAccount(sessionIds, accountMsgCounts, msgsPerAccount, currentIdx);
       if (!found) {
-        if (sock) sock.emit('warmer:log', '[!] Нет доступных аккаунтов');
+        emitToUser('warmer:log', '[!] Нет доступных аккаунтов');
         break;
       }
 
@@ -1096,7 +1150,7 @@ app.post('/api/warmer/start', (req, res) => {
         try {
           const chat = await session.client.getChatById(`${num}@c.us`);
           await chat.sendStateTyping();
-        } catch {}
+        } catch { }
 
         const delay = (Math.random() * (typingDelayMax - typingDelayMin) + typingDelayMin) * 1000;
         const ds = Date.now();
@@ -1108,10 +1162,8 @@ app.post('/api/warmer/start', (req, res) => {
         accountMsgCounts[session.id] = (accountMsgCounts[session.id] || 0) + 1;
         currentIdx = (currentIdx + 1) % sessionIds.length;
 
-        if (sock) {
-          sock.emit('warmer:progress', { sent: totalSent, remaining: numbers.length - i - 1 });
-          sock.emit('warmer:log', `[OK] ${session.displayName} -> +${num}`);
-        }
+        emitToUser('warmer:progress', { sent: totalSent, remaining: numbers.length - i - 1 });
+        emitToUser('warmer:log', `[OK] ${session.displayName} -> +${num}`);
 
         if (pauseAfterMsgs > 0 && totalSent % pauseAfterMsgs === 0) {
           const dur = (Math.random() * (pauseDurationMax - pauseDurationMin) + pauseDurationMin) * 1000;
@@ -1119,25 +1171,23 @@ app.post('/api/warmer/start', (req, res) => {
           while (Date.now() - ps < dur && !controller.aborted) await sleep(300);
         }
       } catch (err) {
-        if (sock) sock.emit('warmer:log', `[ERR] ${err.message}`);
+        emitToUser('warmer:log', `[ERR] ${err.message}`);
         currentIdx = (currentIdx + 1) % sessionIds.length;
       }
     }
 
-    warmerTasks.delete(socketId);
-    if (sock) {
-      sock.emit('warmer:complete', { totalSent });
-      sock.emit('warmer:log', `[DONE] Отправлено: ${totalSent}`);
-    }
-    console.log(`[WARMER] Finished for ${socketId}: ${totalSent} sent`);
+    warmerTasks.delete(userId);
+    emitToUser('warmer:complete', { totalSent });
+    emitToUser('warmer:log', `[DONE] Отправлено: ${totalSent}`);
+    console.log(`[WARMER] Finished for ${userId}: ${totalSent} sent`);
   })();
 
   res.json({ message: 'Запущено' });
 });
 
 app.post('/api/warmer/stop', (req, res) => {
-  const socketId = getSocketId(req);
-  const task = warmerTasks.get(socketId);
+  const userId = getUserId(req);
+  const task = warmerTasks.get(userId);
   if (task) {
     task.controller.aborted = true;
   }
@@ -1145,11 +1195,11 @@ app.post('/api/warmer/stop', (req, res) => {
 });
 
 app.get('/api/status', (req, res) => {
-  const socketId = getSocketId(req);
-  res.json({ 
-    sender: senderTasks.has(socketId), 
-    checker: checkerTasks.has(socketId), 
-    warmer: warmerTasks.has(socketId) 
+  const userId = getUserId(req);
+  res.json({
+    sender: senderTasks.has(userId),
+    checker: checkerTasks.has(userId),
+    warmer: warmerTasks.has(userId)
   });
 });
 
@@ -1208,14 +1258,14 @@ app.post('/api/test-proxy', async (req, res) => {
       const elapsed = Date.now() - startTime;
       console.log(`[PROXY-TEST] OK: ${response.statusCode} in ${elapsed}ms`);
       testReq.destroy();
-      if (anonymized && proxyChain) proxyChain.closeAnonymizedProxy(anonymized, true).catch(() => {});
+      if (anonymized && proxyChain) proxyChain.closeAnonymizedProxy(anonymized, true).catch(() => { });
       res.json({ success: true, status: response.statusCode, timeMs: elapsed });
     });
 
     testReq.on('error', (err) => {
       const elapsed = Date.now() - startTime;
       console.log(`[PROXY-TEST] FAIL: ${err.message} in ${elapsed}ms`);
-      if (anonymized && proxyChain) proxyChain.closeAnonymizedProxy(anonymized, true).catch(() => {});
+      if (anonymized && proxyChain) proxyChain.closeAnonymizedProxy(anonymized, true).catch(() => { });
       res.json({ success: false, error: err.message, timeMs: elapsed });
     });
 
@@ -1223,7 +1273,7 @@ app.post('/api/test-proxy', async (req, res) => {
       const elapsed = Date.now() - startTime;
       console.log(`[PROXY-TEST] TIMEOUT in ${elapsed}ms`);
       testReq.destroy();
-      if (anonymized && proxyChain) proxyChain.closeAnonymizedProxy(anonymized, true).catch(() => {});
+      if (anonymized && proxyChain) proxyChain.closeAnonymizedProxy(anonymized, true).catch(() => { });
       res.json({ success: false, error: 'Timeout (15s)', timeMs: elapsed });
     });
 
@@ -1331,13 +1381,13 @@ app.post('/api/find-proxy', async (req, res) => {
 const clientBuildPath = path.join(__dirname, '..', 'client', 'dist');
 if (fs.existsSync(clientBuildPath)) {
   app.use(express.static(clientBuildPath));
-  
+
   app.get('*', (req, res) => {
     if (!req.path.startsWith('/api') && !req.path.startsWith('/socket.io')) {
       res.sendFile(path.join(clientBuildPath, 'index.html'));
     }
   });
-  
+
   console.log('[OK] Serving client build');
 }
 

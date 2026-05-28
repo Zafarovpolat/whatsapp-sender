@@ -22,19 +22,35 @@ export default function Sender() {
   const logRef = useRef();
 
   useEffect(() => {
-    axios.get('/api/sessions').then(r => setSessions(r.data)).catch(() => {});
+    // Проверить статус при монтировании — вдруг рассылка уже идёт
+    axios.get('/api/status').then(r => {
+      if (r.data.sender) setRunning(true);
+    }).catch(() => { });
+
+    axios.get('/api/sessions').then(r => setSessions(r.data)).catch(() => { });
 
     const onSessions = (data) => setSessions(data);
     const onLog = (m) => setLogs(p => [...p, m]);
     const onProgress = (data) => setProgress(data);
-    const onComplete = () => setRunning(false);
-    const onError = (m) => { setLogs(p => [...p, `[ERR] ${m}`]); setRunning(false); };
+    const onComplete = (data) => {
+      if (data?.totalSent !== undefined) {
+        setProgress(p => ({ ...p, sent: data.totalSent, remaining: 0 }));
+      }
+      setRunning(false);
+    };
+    const onError = (m) => {
+      setLogs(p => [...p, `[ERR] ${m}`]);
+      setRunning(false);
+    };
+    // ═══ НОВОЕ: сервер сообщает что рассылка идёт (после реконнекта) ═══
+    const onRunning = (isRunning) => setRunning(isRunning);
 
     socket.on('sessions:update', onSessions);
     socket.on('sender:log', onLog);
     socket.on('sender:progress', onProgress);
     socket.on('sender:complete', onComplete);
     socket.on('sender:error', onError);
+    socket.on('sender:running', onRunning);
 
     return () => {
       socket.off('sessions:update', onSessions);
@@ -42,6 +58,7 @@ export default function Sender() {
       socket.off('sender:progress', onProgress);
       socket.off('sender:complete', onComplete);
       socket.off('sender:error', onError);
+      socket.off('sender:running', onRunning);
     };
   }, []);
 
@@ -72,7 +89,7 @@ export default function Sender() {
     if (!message.trim()) return alert('Введите сообщение');
 
     setLogs([]);
-    setProgress({ sent: 0, remaining: numCount });
+    setProgress({ sent: 0, remaining: 0 });
     setRunning(true);
 
     try {
@@ -93,7 +110,6 @@ export default function Sender() {
       setLogs(p => [...p, `[ERR] ${errorMsg}`]);
       setRunning(false);
 
-      // ═══ FIX: Если файл не найден — сбрасываем чтобы пользователь загрузил заново ═══
       if (err.response?.status === 400 && errorMsg.includes('Файл')) {
         setFilePath('');
         setFileName('');
@@ -108,7 +124,7 @@ export default function Sender() {
   const stop = async () => {
     try {
       await axios.post('/api/sender/stop');
-    } catch (e) {}
+    } catch (e) { }
     setRunning(false);
   };
 
@@ -186,7 +202,11 @@ export default function Sender() {
                 <div className="stat"><div className="value highlight">{progress.sent}</div><div className="label">Отправлено</div></div>
                 <div className="stat"><div className="value">{progress.remaining}</div><div className="label">Осталось</div></div>
               </div>
-              {numCount > 0 && <div className="progress-bar-container"><div className="progress-bar-fill" style={{ width: `${(progress.sent / numCount) * 100}%` }} /></div>}
+              {numCount > 0 && (
+                <div className="progress-bar-container">
+                  <div className="progress-bar-fill" style={{ width: `${Math.min((progress.sent / numCount) * 100, 100)}%` }} />
+                </div>
+              )}
             </div>
           </div>
         </div>
