@@ -1,4 +1,13 @@
-# WhatsApp Sender
+# 📱 WhatsApp Sender
+
+> Web platform for bulk WhatsApp messaging with multi-account management, number validation, and account warming.
+
+[![Node.js](https://img.shields.io/badge/Node.js-20-339933?logo=nodedotjs&logoColor=white)](https://nodejs.org)
+[![React](https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=black)](https://react.dev)
+[![Socket.IO](https://img.shields.io/badge/Socket.IO-Realtime-010101?logo=socketdotio)](https://socket.io)
+[![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?logo=docker&logoColor=white)](https://docker.com)
+
+---
 
 Веб-платформа для массовой рассылки сообщений через WhatsApp. Запускает несколько WhatsApp-аккаунтов в headless-браузере (Puppeteer), управляет сессиями, проверяет номера и прогревает аккаунты.
 
